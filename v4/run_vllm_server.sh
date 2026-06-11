@@ -29,19 +29,37 @@ python3 -m pip install -q --root-user-action=ignore \
 # MUST run after mcp: pin starlette back to what vLLM's fastapi supports
 python3 -m pip install -q --root-user-action=ignore "starlette<0.49"
 
-echo "==> [2/3] Sanity-checking vLLM imports (catches the Router on_startup crash early)"
+echo "==> [2/4] Sanity-checking vLLM imports (catches the Router on_startup crash early)"
 python3 - <<'PY'
 import fastapi, starlette, vllm
 print(f"    vllm {vllm.__version__} | fastapi {fastapi.__version__} | "
       f"starlette {starlette.__version__} -> OK")
 PY
 
-echo "==> [3/3] Launching vLLM — leave this terminal open"
+echo "==> [3/4] Clearing stale vLLM processes + fitting GPU memory budget"
+# Kill leftover 'vllm serve' processes from earlier attempts — they hold VRAM forever.
+STALE_PIDS=$(pgrep -f "vllm serve" || true)
+if [ -n "${STALE_PIDS}" ]; then
+    echo "    killing stale vLLM PID(s): ${STALE_PIDS}"
+    kill -9 ${STALE_PIDS} 2>/dev/null || true
+    sleep 8   # give the driver a moment to reclaim the VRAM
+fi
+# Auto-fit: never request more than ~90% of the VRAM that is ACTUALLY free right now.
+GPU_MEMORY_UTILIZATION=$(REQUESTED="${GPU_MEMORY_UTILIZATION}" python3 - <<'PY'
+import os, torch
+free_bytes, total_bytes = torch.cuda.mem_get_info()          # works on ROCm (HIP) too
+requested = float(os.environ["REQUESTED"])
+fitted = max(0.05, min(requested, round((free_bytes * 0.9) / total_bytes, 2)))
+print(f"{fitted:.2f}")
+import sys
+print(f"    free VRAM {free_bytes/2**30:.1f}/{total_bytes/2**30:.1f} GiB -> "
+      f"gpu-memory-utilization {fitted:.2f} (requested {requested:.2f})", file=sys.stderr)
+PY
+)
+
+echo "==> [4/4] Launching vLLM — leave this terminal open"
 echo "    First run downloads the model (~8 GB). Wait for 'Application startup complete',"
 echo "    then run the notebook in your other tab."
-echo "    If startup fails with 'Free memory on device ... less than desired', another"
-echo "    process holds the GPU: 'rocm-smi' + kill the old vllm PID, or rerun with"
-echo "    GPU_MEMORY_UTILIZATION=0.12 bash run_vllm_server.sh"
 echo
 exec env VLLM_USE_TRITON_FLASH_ATTN=0 vllm serve "${MODEL_ID}" \
     --served-model-name "${SERVED_MODEL_NAME}" \
