@@ -26,6 +26,33 @@ The runner installs all pip requirements (never touching the lab's ROCm torch), 
 | WebRTC/WebSocket ingress | chunked file streaming (optional 1× pacing) | same dataflow — swap the producer's source for a socket later; nothing downstream changes |
 | LangChain / LangGraph (considered) | **not used** | a fixed 3-stage line needs no graph framework; it would add layers (and ms) between transcript and flag |
 
+## Kaggle MCP: hard-won integration notes
+
+These behaviors were discovered against Kaggle's live MCP server and are baked into CELL 4:
+
+**Anonymous connections are silent.** Kaggle lets an MCP client connect and list all 66 tools with no auth at all — real tool calls then fail with the opaque `An error occurred invoking '...'`. CELL 4a therefore *probes* identity (`get_user_profile`) instead of trusting the connection, and drives the OAuth consent flow only when the probe fails.
+
+**OAuth registration needs one non-default field.** Kaggle only accepts public PKCE clients, so client registration must send `token_endpoint_auth_method="none"`:
+
+```python
+OAuthClientMetadata(..., response_types=["code"],
+                    token_endpoint_auth_method="none")   # without this: HTTP 400 before any consent URL
+```
+
+**The `authorize` tool replies off-spec** — a bare string `"User is already authorized."` where MCP requires a content list, which crashes the SDK validator *after* a successful login. CELL 4a catches that exception and treats it as the success it is.
+
+**Tokens survive cell re-runs.** OAuth tokens live in a kernel-global cache (`KAGGLE_OAUTH_CACHE`), so re-running CELL 4a never re-prompts for consent; a `KGAT` token pasted into `KAGGLE_TOKEN` bypasses the browser flow entirely.
+
+**Arguments come from the server's schema, not guesses.** Each tool's `inputSchema` is the ground truth: `build_args()` reads the required properties and places the value into the first required string field, with hand-written spellings kept only as fallbacks. Both schemas are printed at runtime so a server-side change is visible, not a mystery error. And search is discovery-only — if `search_datasets` fails, the cell warns and downloads the known `DATASET_REFERENCE` anyway, so an optional step can never block the assembly line.
+
+```python
+def build_args(tool_name, value):                  # schema-derived arguments, tried before any guess
+    schema = input_schema(tool_name)
+    for key in (schema.get("required") or list(schema.get("properties", {}))):
+        if schema["properties"].get(key, {}).get("type", "string") == "string":
+            return {key: value}
+```
+
 ## The pipeline, snippet by snippet
 
 **Step 1 — The Ears.** One producer per call walks the recording in 5 s chunks (stereo channels transcribed separately = free speaker separation), skips silence for free, transcribes off the event loop, and stamps each transcript with the moment the flag clock starts:
