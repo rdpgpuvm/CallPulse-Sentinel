@@ -10,20 +10,38 @@ WebSocket, or — when the lab's proxy blocks WS upgrades — via 1s HTTP pollin
   - the full conversation as two-sided bubbles with violation highlighting,
     policy-code chips, the judge's reason, and per-turn timing chips
   - a flashing escalation banner the instant a rule trips
+  - CLEAN MODE toggle: history hidden, utterances fade out after a few seconds
+  - a play/pause button per call that streams the original recording (unsynced
+    with the analysis — playback is for debugging by ear)
+  - smart scrolling: auto-follow only when the viewer is already at the bottom
 
 Started automatically by run_vllm_server.sh on port 7860.
 Open at <your Jupyter base URL>/proxy/7860/
 """
 import argparse
 import json
+import pathlib
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 app = FastAPI()
-EVENT_LOG = []          # full history -> late joiners & polling clients replay everything
-CONNECTED = set()       # live websocket clients
+EVENT_LOG = []                                   # full history -> late joiners replay everything
+CONNECTED = set()                                # live websocket clients
+AUDIO_DIR = pathlib.Path("kaggle_call_data")     # where the notebook downloaded the recordings
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
+
+
+def find_audio_file(call_id: str):
+    """Locate the recording whose filename stem matches the call id."""
+    if not AUDIO_DIR.exists():
+        return None
+    for path in AUDIO_DIR.rglob("*"):
+        if path.stem == call_id and path.suffix.lower() in AUDIO_EXTENSIONS:
+            return path
+    return None
+
 
 PAGE = """<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>AI Call Moderator — LIVE</title>
@@ -37,21 +55,27 @@ PAGE = """<!DOCTYPE html>
   header { padding:14px 22px; border-bottom:1px solid var(--line); display:flex;
            align-items:center; gap:14px; position:sticky; top:0; background:var(--bg); z-index:5; }
   header h1 { font-size:17px; margin:0; letter-spacing:.5px; }
-  #status { color:var(--dim); font-size:13px; }
+  #status { color:var(--dim); font-size:13px; flex:1; }
   .dot { width:9px; height:9px; border-radius:50%; background:var(--warn); display:inline-block; }
   .dot.live { background:#3fb950; }
+  .hbtn { background:var(--panel); color:var(--text); border:1px solid var(--line);
+          border-radius:8px; padding:6px 14px; font-size:12.5px; cursor:pointer; }
+  .hbtn:hover { border-color:var(--dim); }
+  .hbtn.on { border-color:var(--repglow); color:var(--repglow); }
   #calls { padding:18px; display:grid; gap:18px; }
   .call { background:var(--panel); border:1px solid var(--line); border-radius:10px; }
   .call.escalated { border-color:var(--bad); box-shadow:0 0 0 1px var(--bad); }
   .call h2 { margin:0; padding:10px 16px; font-size:13px; color:var(--dim);
-             border-bottom:1px solid var(--line); font-weight:600; }
+             border-bottom:1px solid var(--line); font-weight:600;
+             display:flex; align-items:center; gap:10px; }
+  .play { background:none; border:1px solid var(--line); color:var(--text); cursor:pointer;
+          border-radius:6px; width:30px; height:24px; font-size:12px; line-height:1; }
+  .play:hover { border-color:var(--repglow); color:var(--repglow); }
   .banner { background:var(--bad); color:#fff; padding:10px 16px; font-weight:700;
             font-size:13px; animation:flash 1s linear 6; }
   @keyframes flash { 50% { filter:brightness(1.6);} }
 
-  /* ===== THE STAGE: human figures + live utterance ===== */
-  /* sticky: the figures + live utterance stay pinned under the header while the
-     conversation history scrolls beneath them */
+  /* ===== THE STAGE: sticky under the header while the history scrolls beneath ===== */
   .stage { display:grid; grid-template-columns:120px 1fr 120px; align-items:center;
            gap:14px; padding:18px 20px 14px; position:sticky; top:53px; z-index:4;
            background:var(--panel); border-bottom:1px solid var(--line);
@@ -68,7 +92,7 @@ PAGE = """<!DOCTYPE html>
   .person.customer.speaking .plabel { color:var(--custglow); }
   .speech { min-height:64px; border:1.5px solid var(--line); border-radius:12px;
             padding:12px 16px; font-size:15px; line-height:1.5; color:var(--dim);
-            transition:all .25s ease; }
+            transition:all .25s ease; opacity:1; }
   .speech.rep      { border-color:var(--rep);  color:var(--text);
                      background:rgba(31,111,235,.10); }
   .speech.customer { border-color:var(--cust); color:var(--text);
@@ -76,8 +100,11 @@ PAGE = """<!DOCTYPE html>
   .speech.violation { border-color:var(--bad); background:rgba(218,54,51,.14);
                       box-shadow:0 0 12px rgba(218,54,51,.35); }
   .speech .vio { margin-top:6px; font-size:12px; color:#ffa198; font-weight:600; }
+  .speech.fading { opacity:0; transition:opacity 2s ease; }  /* clean-mode fade-out */
 
-  /* ===== conversation history bubbles ===== */
+  /* ===== conversation history (hidden entirely in clean mode) ===== */
+  body.clean .turns { display:none; }
+  body.clean .stage { border-radius:10px; border-bottom:none; }
   .turns { padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
   .turn { max-width:72%; padding:9px 13px; border-radius:12px; font-size:14px; line-height:1.45; }
   .turn .who { font-size:10.5px; font-weight:700; letter-spacing:.8px; opacity:.85;
@@ -97,13 +124,26 @@ PAGE = """<!DOCTYPE html>
   .chip.time   { background:rgba(110,118,129,.18); color:var(--dim); font-weight:500; }
 </style></head><body>
 <header><h1>&#128737; AI CALL MODERATOR &mdash; LIVE</h1>
-  <span class="dot" id="dot"></span><span id="status">connecting&hellip;</span></header>
+  <span class="dot" id="dot"></span><span id="status">connecting&hellip;</span>
+  <button class="hbtn" id="cleanToggle">&#10024; Clean mode</button></header>
 <div id="calls"></div>
 <script>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
 const calls = {};
-let cursor = 0;          // how many events we've rendered (for the polling fallback)
+const players = {};       // call_id -> {audio, button}
+const fadeTimers = {};    // call_id -> timeout id (clean-mode fade)
+let cursor = 0;
 let polling = false;
+
+/* ---------- clean mode (persisted across reloads) ---------- */
+let cleanMode = localStorage.getItem('cleanMode') === '1';
+function applyClean() {
+  document.body.classList.toggle('clean', cleanMode);
+  cleanToggle.classList.toggle('on', cleanMode);
+}
+cleanToggle.onclick = () => { cleanMode = !cleanMode;
+  localStorage.setItem('cleanMode', cleanMode ? '1' : '0'); applyClean(); };
+applyClean();
 
 /* ---------- transport: WebSocket first, 1s HTTP polling as automatic fallback ---------- */
 function goLive(mode) { dot.classList.add('live'); status.textContent = 'live (' + mode + ')'; }
@@ -127,13 +167,33 @@ try {
   setTimeout(() => { if (ws.readyState !== 1) startPolling(); }, 3000);
 } catch (e) { startPolling(); }
 
+/* ---------- smart scrolling: only follow if the viewer is already near the bottom ---------- */
+function nearBottom() {
+  return window.innerHeight + window.scrollY >= document.body.scrollHeight - 180;
+}
+
+/* ---------- audio play/pause (unsynced with analysis; for debugging by ear) ---------- */
+function attachPlayer(callId, button) {
+  button.onclick = () => {
+    if (!players[callId]) {
+      players[callId] = new Audio(base + 'audio/' + callId);     // streamed from the server
+      players[callId].onended = () => { button.textContent = '\\u25B6'; };
+      players[callId].onerror = () => { button.textContent = '\\u2715'; button.disabled = true; };
+    }
+    const a = players[callId];
+    if (a.paused) { a.play(); button.textContent = '\\u23F8'; }
+    else          { a.pause(); button.textContent = '\\u25B6'; }
+  };
+}
+
 /* ---------- rendering ---------- */
 function panel(callId) {
   if (!calls[callId]) {
     const div = document.createElement('div');
     div.className = 'call';
     div.innerHTML =
-      '<h2>CALL ' + callId + '</h2>' +
+      '<h2><button class="play" title="play/pause the recording">\\u25B6</button>' +
+      'CALL ' + callId + '</h2>' +
       '<div class="stage">' +
         '<div class="person rep"><span class="figure">&#129489;&#8205;&#128188;</span>' +
           '<div class="plabel">Customer Rep</div></div>' +
@@ -143,6 +203,7 @@ function panel(callId) {
       '</div>' +
       '<div class="turns"></div>';
     document.getElementById('calls').appendChild(div);
+    attachPlayer(callId, div.querySelector('.play'));
     calls[callId] = div;
   }
   return calls[callId];
@@ -153,14 +214,22 @@ function render(ev) {
     /* light up the speaking figure, dim the other */
     p.querySelectorAll('.person').forEach(el => el.classList.remove('speaking'));
     p.querySelector('.person.' + ev.role).classList.add('speaking');
-    /* show the live utterance between the figures */
+    /* live utterance between the figures */
     const sp = p.querySelector('.speech');
     sp.className = 'speech ' + ev.role + (ev.violations.length ? ' violation' : '');
     sp.innerHTML = '&ldquo;' + ev.text + '&rdquo;' +
       (ev.violations.length
         ? '<div class="vio">&#9888; ' + ev.violations.join(', ') + ' — ' + (ev.reason || '') + '</div>'
         : '');
-    /* append to the conversation history */
+    /* clean mode: fade the utterance away after a few seconds of stillness */
+    clearTimeout(fadeTimers[ev.call_id]);
+    if (cleanMode && !ev.violations.length) {          // violations stay visible until the next turn
+      fadeTimers[ev.call_id] = setTimeout(() => {
+        sp.classList.add('fading');
+        p.querySelectorAll('.person').forEach(el => el.classList.remove('speaking'));
+      }, 4500);
+    }
+    /* conversation history bubble (hidden by CSS in clean mode, still recorded) */
     const t = document.createElement('div');
     t.className = 'turn ' + ev.role + (ev.violations.length ? ' violation' : '');
     const who = ev.role === 'rep' ? 'Customer Rep' : 'Customer';
@@ -173,7 +242,9 @@ function render(ev) {
     t.innerHTML = '<div class="who">' + who + ' &middot; t' + ev.turn_number + '</div>' +
                   ev.text + '<div class="chips">' + chips + '</div>';
     p.querySelector('.turns').appendChild(t);
-    t.scrollIntoView({behavior:'smooth', block:'end'});
+    if (!cleanMode && nearBottom())                    // follow only if the viewer was at the bottom
+      t.scrollIntoView({behavior:'smooth', block:'end'});
+    status.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
   } else if (ev.type === 'alert') {
     const p = panel(ev.call_id);
     p.classList.add('escalated');
@@ -210,12 +281,21 @@ async def index():
     return HTMLResponse(PAGE)
 
 
-# Some Jupyter proxies forward the FULL path (/proxy/7860/...) instead of stripping it,
-# so any unknown GET serves the dashboard — except */events, which is the polling API.
+# Catch-all GET, because some Jupyter proxies forward the FULL /proxy/7860/... path:
+#   */events           -> polling API (since=N)
+#   */audio/<call_id>  -> stream the original recording for the play button
+#   anything else      -> the dashboard page
 @app.get("/{full_path:path}")
 async def index_any(full_path: str, since: int = 0):
-    if full_path.rstrip("/").endswith("events"):
+    trimmed = full_path.rstrip("/")
+    if trimmed.endswith("events"):
         return JSONResponse({"events": EVENT_LOG[since:], "next": len(EVENT_LOG)})
+    if "audio/" in trimmed:
+        call_id = trimmed.rsplit("audio/", 1)[1]
+        audio_path = find_audio_file(call_id)
+        if audio_path is not None:
+            return FileResponse(audio_path)
+        return JSONResponse({"error": f"no recording found for {call_id}"}, status_code=404)
     return HTMLResponse(PAGE)
 
 
@@ -236,5 +316,8 @@ async def websocket_endpoint(ws: WebSocket):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--audio-dir", default="kaggle_call_data",
+                        help="directory containing the downloaded recordings")
     args = parser.parse_args()
+    AUDIO_DIR = pathlib.Path(args.audio_dir)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
