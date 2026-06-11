@@ -41,7 +41,7 @@ PAGE = """<!DOCTYPE html>
   .dot { width:9px; height:9px; border-radius:50%; background:var(--warn); display:inline-block; }
   .dot.live { background:#3fb950; }
   #calls { padding:18px; display:grid; gap:18px; }
-  .call { background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .call { background:var(--panel); border:1px solid var(--line); border-radius:10px; }
   .call.escalated { border-color:var(--bad); box-shadow:0 0 0 1px var(--bad); }
   .call h2 { margin:0; padding:10px 16px; font-size:13px; color:var(--dim);
              border-bottom:1px solid var(--line); font-weight:600; }
@@ -50,8 +50,12 @@ PAGE = """<!DOCTYPE html>
   @keyframes flash { 50% { filter:brightness(1.6);} }
 
   /* ===== THE STAGE: human figures + live utterance ===== */
+  /* sticky: the figures + live utterance stay pinned under the header while the
+     conversation history scrolls beneath them */
   .stage { display:grid; grid-template-columns:120px 1fr 120px; align-items:center;
-           gap:14px; padding:18px 20px 8px; }
+           gap:14px; padding:18px 20px 14px; position:sticky; top:53px; z-index:4;
+           background:var(--panel); border-bottom:1px solid var(--line);
+           border-radius:10px 10px 0 0; }
   .person { text-align:center; }
   .person .figure { font-size:52px; line-height:1; opacity:.35; filter:grayscale(.9);
                     transition:all .25s ease; display:inline-block; }
