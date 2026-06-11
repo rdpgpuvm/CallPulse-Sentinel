@@ -62,7 +62,15 @@ PAGE = """<!DOCTYPE html>
           border-radius:8px; padding:6px 14px; font-size:12.5px; cursor:pointer; }
   .hbtn:hover { border-color:var(--dim); }
   .hbtn.on { border-color:var(--repglow); color:var(--repglow); }
+  #tabs { display:flex; gap:8px; padding:12px 18px 0; flex-wrap:wrap; }
+  .tab { background:var(--panel); border:1px solid var(--line); color:var(--dim); cursor:pointer;
+         border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600; }
+  .tab:hover { border-color:var(--dim); }
+  .tab.selected { border-color:var(--repglow); color:var(--repglow); }
+  .tab.alerted  { border-color:var(--bad); color:#ffa198; animation:flash 1s linear 6; }
   #calls { padding:18px; display:grid; gap:18px; }
+  .call { display:none; }                 /* one call at a time — pick via the tab bar */
+  .call.selected { display:block; }
   .call { background:var(--panel); border:1px solid var(--line); border-radius:10px; }
   .call.escalated { border-color:var(--bad); box-shadow:0 0 0 1px var(--bad); }
   .call h2 { margin:0; padding:10px 16px; font-size:13px; color:var(--dim);
@@ -126,10 +134,21 @@ PAGE = """<!DOCTYPE html>
 <header><h1>&#128737; AI CALL MODERATOR &mdash; LIVE</h1>
   <span class="dot" id="dot"></span><span id="status">connecting&hellip;</span>
   <button class="hbtn" id="cleanToggle">&#10024; Clean mode</button></header>
+<div id="tabs"></div>
 <div id="calls"></div>
 <script>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
 const calls = {};
+let selectedCall = null;  // only ONE call is displayed; the rest live behind tabs
+function selectCall(callId) {
+  selectedCall = callId;
+  document.querySelectorAll('.call').forEach(el =>
+    el.classList.toggle('selected', el.dataset.cid === callId));
+  document.querySelectorAll('.tab').forEach(el => {
+    el.classList.toggle('selected', el.dataset.cid === callId);
+    if (el.dataset.cid === callId) el.classList.remove('alerted');
+  });
+}
 const players = {};       // call_id -> {audio, button}
 const fadeTimers = {};    // call_id -> timeout id (clean-mode fade)
 let cursor = 0;
@@ -202,9 +221,16 @@ function panel(callId) {
           '<div class="plabel">Customer</div></div>' +
       '</div>' +
       '<div class="turns"></div>';
+    div.dataset.cid = callId;
     document.getElementById('calls').appendChild(div);
     attachPlayer(callId, div.querySelector('.play'));
+    const tab = document.createElement('button');      // one tab per loaded call
+    tab.className = 'tab'; tab.dataset.cid = callId;
+    tab.textContent = 'CALL ' + callId.slice(0, 10) + '…';
+    tab.onclick = () => selectCall(callId);
+    document.getElementById('tabs').appendChild(tab);
     calls[callId] = div;
+    if (!selectedCall) selectCall(callId);             // first call to arrive is shown
   }
   return calls[callId];
 }
@@ -254,6 +280,10 @@ function render(ev) {
                     '  (judge ' + ev.judge_ms + ' ms)';
     p.insertBefore(b, p.querySelector('.stage'));
     document.title = '\\u{1F6A8} ESCALATION — AI Call Moderator';
+    if (ev.call_id !== selectedCall) {                 // escalation on a hidden call -> its tab screams
+      const tab = document.querySelector('.tab[data-cid="' + ev.call_id + '"]');
+      if (tab) tab.classList.add('alerted');
+    }
   } else if (ev.type === 'status') {
     status.textContent = ev.text;
   }
