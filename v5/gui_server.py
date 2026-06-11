@@ -123,6 +123,13 @@ async def index():
     return HTMLResponse(PAGE)
 
 
+# Some Jupyter proxies forward the FULL path (/proxy/7860/...) instead of stripping it.
+# Catch-all: any GET that isn't an API route serves the dashboard, so the URL always works.
+@app.get("/{full_path:path}")
+async def index_any(full_path: str):
+    return HTMLResponse(PAGE)
+
+
 @app.post("/event")
 async def receive_event(event: dict):
     """Notebook pipeline -> dashboard. Stores + broadcasts to every open browser."""
@@ -139,6 +146,7 @@ async def receive_event(event: dict):
 
 
 @app.websocket("/ws")
+@app.websocket("/{prefix:path}/ws")          # tolerate full-path forwarding for the socket too
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     for event in EVENT_LOG:                    # replay history for late joiners
