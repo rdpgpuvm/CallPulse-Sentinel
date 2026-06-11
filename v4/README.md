@@ -45,12 +45,13 @@ OAuthClientMetadata(..., response_types=["code"],
 
 **Arguments come from the server's schema, not guesses.** Each tool's `inputSchema` is the ground truth: `build_args()` reads the required properties and places the value into the first required string field, with hand-written spellings kept only as fallbacks. Both schemas are printed at runtime so a server-side change is visible, not a mystery error. And search is discovery-only — if `search_datasets` fails, the cell warns and downloads the known `DATASET_REFERENCE` anyway, so an optional step can never block the assembly line.
 
+The decisive discovery: **Kaggle wraps every tool's arguments in a nested `request` object** — flat arguments always fail with the generic invoking error. The schemas (printed at runtime) reveal it, e.g. `download_dataset` wants:
+
 ```python
-def build_args(tool_name, value):                  # schema-derived arguments, tried before any guess
-    schema = input_schema(tool_name)
-    for key in (schema.get("required") or list(schema.get("properties", {}))):
-        if schema["properties"].get(key, {}).get("type", "string") == "string":
-            return {key: value}
+await call_kaggle("download_dataset",
+    [{"request": {"ownerSlug": "unidpro", "datasetSlug": "call-center-audio"}}])
+await call_kaggle("search_datasets",
+    [{"request": {"searchNullable": "call center audio"}}])
 ```
 
 ## The pipeline, snippet by snippet
