@@ -29,17 +29,19 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 app = FastAPI()
 EVENT_LOG = []                                   # full history -> late joiners replay everything
 CONNECTED = set()                                # live websocket clients
-AUDIO_DIR = pathlib.Path("kaggle_call_data")     # where the notebook downloaded the recordings
+AUDIO_DIRS = [pathlib.Path("call_recordings"),   # committed in the repo (primary)
+              pathlib.Path("kaggle_call_data")]  # leftovers from an old Kaggle run
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 
 
 def find_audio_file(call_id: str):
-    """Locate the recording whose filename stem matches the call id."""
-    if not AUDIO_DIR.exists():
-        return None
-    for path in AUDIO_DIR.rglob("*"):
-        if path.stem == call_id and path.suffix.lower() in AUDIO_EXTENSIONS:
-            return path
+    """Locate the recording whose filename stem matches the call id (either dir)."""
+    for directory in AUDIO_DIRS:
+        if not directory.exists():
+            continue
+        for path in directory.rglob("*"):
+            if path.stem == call_id and path.suffix.lower() in AUDIO_EXTENSIONS:
+                return path
     return None
 
 
