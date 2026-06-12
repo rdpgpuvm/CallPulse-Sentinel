@@ -27,7 +27,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 app = FastAPI()
+EVENT_FILE = pathlib.Path("/tmp/call_moderator_events.jsonl")   # survives gui_server restarts
 EVENT_LOG = []                                   # full history -> late joiners replay everything
+if EVENT_FILE.exists():                          # replay persisted events on startup, so a GUI
+    for line in EVENT_FILE.read_text().splitlines():            # restart shows the running call instantly
+        try:
+            EVENT_LOG.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
 CONNECTED = set()                                # live websocket clients
 AUDIO_DIRS = [pathlib.Path("call_recordings"),   # committed in the repo (primary)
               pathlib.Path("kaggle_call_data")]  # leftovers from an old Kaggle run
@@ -281,6 +288,8 @@ function render(ev) {
 async def receive_event(event: dict):
     """Notebook pipeline -> dashboard. Stores + broadcasts to every open browser."""
     EVENT_LOG.append(event)
+    with EVENT_FILE.open("a") as persisted:      # append-only journal — cheap, restart-proof
+        persisted.write(json.dumps(event) + "\n")
     dead = []
     for ws in CONNECTED:
         try:
