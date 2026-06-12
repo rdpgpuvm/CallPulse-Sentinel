@@ -78,9 +78,8 @@ PAGE = """<!DOCTYPE html>
   .call h2 { margin:0; padding:10px 16px; font-size:13px; color:var(--dim);
              border-bottom:1px solid var(--line); font-weight:600;
              display:flex; align-items:center; gap:10px; }
-  .play { background:none; border:1px solid var(--line); color:var(--text); cursor:pointer;
-          border-radius:6px; width:30px; height:24px; font-size:12px; line-height:1; }
-  .play:hover { border-color:var(--repglow); color:var(--repglow); }
+  .call h2 audio { height:30px; margin-left:auto; flex:1; max-width:480px;
+                   filter:invert(.88) hue-rotate(180deg); border-radius:6px; }
   .banner { background:var(--bad); color:#fff; padding:10px 16px; font-weight:700;
             font-size:13px; animation:flash 1s linear 6; }
   @keyframes flash { 50% { filter:brightness(1.6);} }
@@ -151,7 +150,6 @@ function selectCall(callId) {
     if (el.dataset.cid === callId) el.classList.remove('alerted');
   });
 }
-const players = {};       // call_id -> {audio, button}
 const fadeTimers = {};    // call_id -> timeout id (clean-mode fade)
 let cursor = 0;
 let polling = false;
@@ -193,28 +191,15 @@ function nearBottom() {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 180;
 }
 
-/* ---------- audio play/pause (unsynced with analysis; for debugging by ear) ---------- */
-function attachPlayer(callId, button) {
-  button.onclick = () => {
-    if (!players[callId]) {
-      players[callId] = new Audio(base + 'audio/' + callId);     // streamed from the server
-      players[callId].onended = () => { button.textContent = '\\u25B6'; };
-      players[callId].onerror = () => { button.textContent = '\\u2715'; button.disabled = true; };
-    }
-    const a = players[callId];
-    if (a.paused) { a.play(); button.textContent = '\\u23F8'; }
-    else          { a.pause(); button.textContent = '\\u25B6'; }
-  };
-}
-
 /* ---------- rendering ---------- */
 function panel(callId) {
   if (!calls[callId]) {
     const div = document.createElement('div');
     div.className = 'call';
     div.innerHTML =
-      '<h2><button class="play" title="play/pause the recording">\\u25B6</button>' +
-      'CALL ' + callId + '</h2>' +
+      '<h2>CALL ' + callId +
+      '<audio controls preload="metadata" src="' + base + 'audio/' + callId + '"' +
+      ' title="play / pause / drag the seek bar — unsynced with analysis"></audio></h2>' +
       '<div class="stage">' +
         '<div class="person rep"><span class="figure">&#129489;&#8205;&#128188;</span>' +
           '<div class="plabel">Customer Rep</div></div>' +
@@ -225,7 +210,6 @@ function panel(callId) {
       '<div class="turns"></div>';
     div.dataset.cid = callId;
     document.getElementById('calls').appendChild(div);
-    attachPlayer(callId, div.querySelector('.play'));
     const tab = document.createElement('button');      // one tab per loaded call
     tab.className = 'tab'; tab.dataset.cid = callId;
     tab.textContent = 'CALL ' + callId.slice(0, 10) + '…';
