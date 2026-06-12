@@ -29,19 +29,17 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 app = FastAPI()
 EVENT_LOG = []                                   # full history -> late joiners replay everything
 CONNECTED = set()                                # live websocket clients
-AUDIO_DIRS = [pathlib.Path("call_recordings"),   # committed in the repo (teammate mode)
-              pathlib.Path("kaggle_call_data")]  # left behind by a Kaggle pull
+AUDIO_DIR = pathlib.Path("kaggle_call_data")     # where the notebook downloaded the recordings
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 
 
 def find_audio_file(call_id: str):
-    """Locate the recording whose filename stem matches the call id (either source dir)."""
-    for directory in AUDIO_DIRS:
-        if not directory.exists():
-            continue
-        for path in directory.rglob("*"):
-            if path.stem == call_id and path.suffix.lower() in AUDIO_EXTENSIONS:
-                return path
+    """Locate the recording whose filename stem matches the call id."""
+    if not AUDIO_DIR.exists():
+        return None
+    for path in AUDIO_DIR.rglob("*"):
+        if path.stem == call_id and path.suffix.lower() in AUDIO_EXTENSIONS:
+            return path
     return None
 
 
@@ -348,9 +346,8 @@ async def websocket_endpoint(ws: WebSocket):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--audio-dir", default=None,
-                        help="extra directory containing recordings")
+    parser.add_argument("--audio-dir", default="kaggle_call_data",
+                        help="directory containing the downloaded recordings")
     args = parser.parse_args()
-    if args.audio_dir:
-        AUDIO_DIRS.insert(0, pathlib.Path(args.audio_dir))
+    AUDIO_DIR = pathlib.Path(args.audio_dir)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
