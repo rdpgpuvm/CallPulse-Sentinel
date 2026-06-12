@@ -62,7 +62,11 @@ GPU_MEMORY_UTILIZATION=$(REQUESTED="${GPU_MEMORY_UTILIZATION}" python3 - <<'PY'
 import os, sys, torch
 free_bytes, total_bytes = torch.cuda.mem_get_info()
 requested = float(os.environ["REQUESTED"])
-fitted = max(0.05, min(requested, round((free_bytes * 0.9) / total_bytes, 2)))
+# PERF: reserve ~7 GiB of the free VRAM for the GPU Whisper STT (loaded by the notebook)
+# plus headroom — without this, vLLM grabs ~90% of free memory and Whisper OOMs to CPU.
+reserve_bytes = 7 * 2**30
+usable_bytes = max(free_bytes - reserve_bytes, free_bytes * 0.4)
+fitted = max(0.05, min(requested, round(usable_bytes / total_bytes, 2)))
 print(f"{fitted:.2f}")
 print(f"    free VRAM {free_bytes/2**30:.1f}/{total_bytes/2**30:.1f} GiB -> "
       f"gpu-memory-utilization {fitted:.2f} (requested {requested:.2f})", file=sys.stderr)
