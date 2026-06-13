@@ -98,7 +98,7 @@ cp .env.example .env
 Create `.env` using `printf` (works in Jupyter terminals — do **not** use `cat <<EOF` as it breaks when pasted on one line):
 
 ```bash
-printf 'LANGFUSE_PUBLIC_KEY=pk-lf-REPLACE_ME\nLANGFUSE_SECRET_KEY=sk-lf-REPLACE_ME\nLANGFUSE_BASE_URL="https://us.cloud.langfuse.com"\n' > .env
+printf 'LANGFUSE_PUBLIC_KEY=pk-lf-REPLACE_ME\nLANGFUSE_SECRET_KEY=sk-lf-REPLACE_ME\nLANGFUSE_BASE_URL=https://us.cloud.langfuse.com\n' > .env
 ```
 
 Verify it wrote correctly:
