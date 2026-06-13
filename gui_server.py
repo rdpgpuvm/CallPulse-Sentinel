@@ -37,7 +37,7 @@ if EVENT_FILE.exists():
         except json.JSONDecodeError:
             pass
 CONNECTED  = set()
-AUDIO_DIRS = [pathlib.Path("call_recordings"), pathlib.Path("kaggle_call_data")]
+AUDIO_DIRS = [pathlib.Path("call_recordings"), pathlib.Path("scam_call"), pathlib.Path("kaggle_call_data")]
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
 
 
@@ -524,5 +524,5 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--audio-dir", default="kaggle_call_data")
     args = parser.parse_args()
-    AUDIO_DIRS[1] = pathlib.Path(args.audio_dir)
+    AUDIO_DIRS[2] = pathlib.Path(args.audio_dir)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
