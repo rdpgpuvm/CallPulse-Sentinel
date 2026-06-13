@@ -90,16 +90,24 @@ Copy the public + secret key into `.env`:
 ```bash
 cp .env.example .env
 # Edit .env and fill in your keys + set:
-# LANGFUSE_HOST=http://localhost:3000
+# LANGFUSE_BASE_URL="http://localhost:3000"
 ```
 
 ### Mode B — Langfuse cloud (free tier, account at langfuse.com)
 
+Create `.env` using `printf` (works in Jupyter terminals — do **not** use `cat <<EOF` as it breaks when pasted on one line):
+
 ```bash
-cp .env.example .env
-# Fill in LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY from langfuse.com
-# Leave LANGFUSE_HOST commented out (defaults to cloud)
+printf 'LANGFUSE_PUBLIC_KEY=pk-lf-REPLACE_ME\nLANGFUSE_SECRET_KEY=sk-lf-REPLACE_ME\nLANGFUSE_BASE_URL="https://us.cloud.langfuse.com"\n' > .env
 ```
+
+Verify it wrote correctly:
+
+```bash
+cat .env
+```
+
+Then fill in your real keys from **langfuse.com → Project Settings → API Keys**.
 
 ### Mode C — Local file logging (zero setup, zero dependencies, always works)
 

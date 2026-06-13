@@ -10,14 +10,14 @@ Three modes — pick whichever suits your setup:
   Set in .env:
       LANGFUSE_PUBLIC_KEY=pk-lf-...   ← from your local project
       LANGFUSE_SECRET_KEY=sk-lf-...
-      LANGFUSE_HOST=http://localhost:3000
+      LANGFUSE_BASE_URL=http://localhost:3000
 
   MODE B: Langfuse cloud (free tier, account at langfuse.com)
   ───────────────────────────────────────────────────────────
   Set in .env:
       LANGFUSE_PUBLIC_KEY=pk-lf-...
       LANGFUSE_SECRET_KEY=sk-lf-...
-      (LANGFUSE_HOST defaults to https://cloud.langfuse.com)
+      (LANGFUSE_BASE_URL defaults to https://us.cloud.langfuse.com)
 
   MODE C: Local file logging (zero setup, zero dependencies)
   ──────────────────────────────────────────────────────────
@@ -50,12 +50,13 @@ try:
     _lf = Langfuse(
         public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-        host=os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+        host=os.environ.get("LANGFUSE_BASE_URL", os.environ.get("LANGFUSE_HOST", "https://us.cloud.langfuse.com")),
         release=os.environ.get("LANGFUSE_RELEASE", "call-moderator"),
     )
-    _is_local = "localhost" in os.environ.get("LANGFUSE_HOST", "")
+    _is_local = "localhost" in os.environ.get("LANGFUSE_BASE_URL", os.environ.get("LANGFUSE_HOST", ""))
     _mode = "self-hosted" if _is_local else "cloud"
-    print(f"[langfuse] {_mode} mode active — dashboard at {_lf.base_url}  session={_session_id}")
+    print(f"[langfuse] {_mode} mode active — dashboard at "
+      f"{os.environ.get('LANGFUSE_BASE_URL', os.environ.get('LANGFUSE_HOST', 'https://us.cloud.langfuse.com'))}  session={_session_id}")
 except ImportError:
     print("[langfuse] SDK not installed — using local file mode  (pip install langfuse for dashboard)")
 except KeyError:
@@ -148,7 +149,8 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
         return result
 
     print(f"[langfuse] generate_json patched — mode: {_mode}  "
-          + (f"traces → {_local_trace_file.name}" if _lf is None else f"dashboard → {_lf.base_url}"))
+          + (f"traces → {_local_trace_file.name}" if _lf is None
+         else f"dashboard → {os.environ.get('LANGFUSE_BASE_URL', os.environ.get('LANGFUSE_HOST', 'https://us.cloud.langfuse.com'))}"))
     return _wrapped
 
 
