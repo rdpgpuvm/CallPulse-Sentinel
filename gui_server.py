@@ -217,6 +217,9 @@ PAGE = r"""<!DOCTYPE html>
   <span class="dot" id="dot"></span>
   <span id="status">connecting&hellip;</span>
   <span id="supervising" title="Supervisor has joined the call">&#128101;&#128101; SUPERVISING</span>
+  <label class="hbtn sync-label" title="Seek audio to match each incoming turn timestamp">
+    <input type="checkbox" id="syncCheck" style="margin-right:5px">Sync audio
+  </label>
   <button class="hbtn" id="cleanToggle">Simple</button>
 </header>
 <div id="tabs"></div>
@@ -229,6 +232,11 @@ let base = location.pathname; if (!base.endsWith('/')) base += '/';
 const calls    = {};
 const callData = {};
 let selectedCall = null, cursor = 0, polling = false;
+
+/* ---------- audio sync ---------- */
+let audioSync = false;
+const syncCheck = document.getElementById('syncCheck');
+syncCheck.onchange = () => { audioSync = syncCheck.checked; };
 
 /* ---------- clean mode ---------- */
 let cleanMode = localStorage.getItem('cleanMode') === '1';
@@ -462,6 +470,10 @@ function render(ev) {
     p.querySelector('.turns').appendChild(t);
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     status.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
+    /* sync audio seeker: when checked, each incoming turn moves the player to its timestamp */
+    if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined) {
+      seekTo(ev.call_id, ev.audio_start_s);
+    }
 
   } else if (ev.type === 'alert') {
     const p = panel(ev.call_id);
