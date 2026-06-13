@@ -396,9 +396,12 @@ function refreshSkipPanel(callId) {
     item.className = 'skip-item';
     item.title = 'Seek to ' + fmtTime(sk.audio_start_s) + ' and listen to validate this skip';
     const rc = (sk.reason || 'silence').replace(/[^a-z_]/g, '');
+    const SKIP_LABELS = {silence:'silence',beep:'🔇 PII/Sensitive',
+      no_speech:'no speech',low_confidence:'low confidence',repetition:'repetition'};
+    const skipLabel = SKIP_LABELS[rc] || rc;
     item.innerHTML =
       '<span class="skip-ts">' + fmtTime(sk.audio_start_s) + '</span>' +
-      '<span class="skip-tag ' + rc + '">' + (sk.reason || 'silence') + '</span>' +
+      '<span class="skip-tag ' + rc + '">' + skipLabel + '</span>' +
       '<span class="skip-detail">' + (sk.detail || '') + '</span>' +
       '<span class="skip-seek">▶ seek</span>';
     item.onclick = () => seekTo(callId, sk.audio_start_s);
