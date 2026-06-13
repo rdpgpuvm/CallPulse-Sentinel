@@ -1,160 +1,153 @@
 """
-langfuse_config.py — token & trace monitoring for CallModerator
-================================================================
-Three modes — pick whichever suits your setup:
+langfuse_config.py — Langfuse v3 SDK integration for AI Call Moderator
+────────────────────────────────────────────────────────────────────────
+Modes (auto-detected):
+  A — Langfuse cloud (LANGFUSE_PUBLIC_KEY + LANGFUSE_SECRET_KEY in .env)
+  B — Self-hosted    (same keys + LANGFUSE_BASE_URL=http://localhost:3000)
+  C — Local JSONL    (no keys — writes to langfuse_traces.jsonl, zero deps)
 
-  MODE A: Self-hosted Langfuse (Docker, FREE, no account)
-  ────────────────────────────────────────────────────────
-  Run Langfuse locally with one Docker command (see README).
-  Full dashboard at http://localhost:3000.
-  Set in .env:
-      LANGFUSE_PUBLIC_KEY=pk-lf-...   ← from your local project
-      LANGFUSE_SECRET_KEY=sk-lf-...
-      LANGFUSE_BASE_URL=http://localhost:3000
+.env format (no quotes around values):
+  LANGFUSE_PUBLIC_KEY=pk-lf-...
+  LANGFUSE_SECRET_KEY=sk-lf-...
+  LANGFUSE_BASE_URL=https://us.cloud.langfuse.com
 
-  MODE B: Langfuse cloud (free tier, account at langfuse.com)
-  ───────────────────────────────────────────────────────────
-  Set in .env:
-      LANGFUSE_PUBLIC_KEY=pk-lf-...
-      LANGFUSE_SECRET_KEY=sk-lf-...
-      (LANGFUSE_BASE_URL defaults to https://us.cloud.langfuse.com)
-
-  MODE C: Local file logging (zero setup, zero dependencies)
-  ──────────────────────────────────────────────────────────
-  No .env, no keys, no Docker. Every LLM call is logged to
-  langfuse_traces.jsonl in the repo root. View with:
-      import langfuse_config; langfuse_config.show_local_traces()
-
-In all modes the pipeline performance is UNCHANGED — tracing
-is fully async/background and returns in <1 ms.
+Pipeline is completely UNCHANGED if this file is not imported.
 """
 
-import os, json, time, uuid, pathlib
+import os, json, time, pathlib
+from datetime import datetime, timezone
 
-# ── load .env if present ──────────────────────────────────────────────────────
-_env_path = pathlib.Path(__file__).parent / ".env"
-if _env_path.exists():
-    for _line in _env_path.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
-
-_session_id = str(uuid.uuid4())[:8]   # groups all turns in one run
-_lf = None
-_mode = "local"
-
-# ── attempt Langfuse SDK (modes A + B) ────────────────────────────────────────
+# ── Load .env ────────────────────────────────────────────────────────────────
 try:
-    from langfuse import Langfuse
-    _lf = Langfuse(
-        public_key=os.environ["LANGFUSE_PUBLIC_KEY"],
-        secret_key=os.environ["LANGFUSE_SECRET_KEY"],
-        host=os.environ.get("LANGFUSE_BASE_URL", os.environ.get("LANGFUSE_HOST", "https://us.cloud.langfuse.com")),
-        release=os.environ.get("LANGFUSE_RELEASE", "call-moderator"),
-    )
-    _is_local = "localhost" in os.environ.get("LANGFUSE_BASE_URL", os.environ.get("LANGFUSE_HOST", ""))
-    _mode = "self-hosted" if _is_local else "cloud"
-    print(f"[langfuse] {_mode} mode active — dashboard at "
-      f"{os.environ.get('LANGFUSE_BASE_URL', os.environ.get('LANGFUSE_HOST', 'https://us.cloud.langfuse.com'))}  session={_session_id}")
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
 except ImportError:
-    print("[langfuse] SDK not installed — using local file mode  (pip install langfuse for dashboard)")
-except KeyError:
-    print("[langfuse] No keys found — using local file mode  (see .env.example to enable dashboard)")
-except Exception as e:
-    print(f"[langfuse] Init failed ({e}) — using local file mode")
+    pass  # python-dotenv optional
 
-# ── local file fallback (mode C) ─────────────────────────────────────────────
-_local_trace_file = pathlib.Path(__file__).parent / "langfuse_traces.jsonl"
+# ── Try Langfuse v3 SDK ───────────────────────────────────────────────────────
+_lf        = None
+_mode      = "local"
+_local_log = None
+_session_id = f"sess-{int(time.time())}"
+
+_pub = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+_sec = os.environ.get("LANGFUSE_SECRET_KEY", "")
+_url = os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
+
+if _pub.startswith("pk-lf-") and _sec.startswith("sk-lf-"):
+    try:
+        from langfuse import get_client
+        _lf   = get_client()   # reads LANGFUSE_PUBLIC_KEY / SECRET_KEY / BASE_URL automatically
+        _mode = "cloud" if "localhost" not in _url else "self-hosted"
+        print(f"[langfuse] {_mode} mode active — {_url}  session={_session_id}")
+    except Exception as e:
+        _lf = None
+        print(f"[langfuse] Init failed ({e}) — using local file mode")
+else:
+    print("[langfuse] No API keys found — using local file mode (Mode C)")
+
+if _lf is None:
+    _local_log = open("langfuse_traces.jsonl", "a")
+    _mode = "local"
 
 
-def _log_local(stage, prompt_tokens, completion_tokens, latency_ms, result, system_prompt, user_prompt):
-    """Append one trace record to langfuse_traces.jsonl (mode C fallback)."""
-    record = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+# ── Local file helpers (Mode C) ───────────────────────────────────────────────
+def _log_local(stage, system_prompt, user_prompt, result, elapsed_ms, usage):
+    if _local_log is None:
+        return
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
         "session": _session_id,
         "stage": stage,
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-        "latency_ms": round(latency_ms, 1),
-        "output": result,
-        "system_snippet": system_prompt[:120],
-        "user_snippet": user_prompt[:120],
+        "input_chars": len(system_prompt) + len(user_prompt),
+        "elapsed_ms": round(elapsed_ms),
+        "usage": usage,
+        "output_keys": list(result.keys()) if isinstance(result, dict) else None,
     }
-    with _local_trace_file.open("a") as f:
-        f.write(json.dumps(record) + "\n")
+    _local_log.write(json.dumps(row) + "\n")
+    _local_log.flush()
 
 
-def show_local_traces(tail=20):
-    """Print the last N traces from langfuse_traces.jsonl (mode C viewer)."""
-    if not _local_trace_file.exists():
-        print("No local traces yet — run the pipeline first.")
+def show_local_traces(n=20):
+    """Print last N traces from local JSONL file."""
+    p = pathlib.Path("langfuse_traces.jsonl")
+    if not p.exists():
+        print("No local trace file yet.")
         return
-    lines = _local_trace_file.read_text().splitlines()
-    print(f"\nLocal traces ({len(lines)} total, showing last {tail}):")
-    print(f"{'timestamp':<22} {'session':<10} {'stage':<22} {'prompt':>7} {'compl':>6} {'total':>6} {'ms':>7}")
-    print("-" * 90)
-    for line in lines[-tail:]:
-        r = json.loads(line)
-        print(f"{r['ts']:<22} {r['session']:<10} {r['stage']:<22} "
-              f"{r['prompt_tokens']:>7} {r['completion_tokens']:>6} "
-              f"{r['total_tokens']:>6} {r['latency_ms']:>7.0f}")
-    total_tokens = sum(json.loads(l)['total_tokens'] for l in lines)
-    print(f"\nAll-time total: {total_tokens:,} tokens across {len(lines)} calls")
+    rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    rows = rows[-n:]
+    if not rows:
+        print("No traces recorded yet.")
+        return
+    print(f"\n{'ts':<26} {'stage':<22} {'ms':>6}  {'in_ch':>6}  {'usage'}")
+    print("-" * 80)
+    for r in rows:
+        u = r.get("usage") or {}
+        print(f"{r['ts'][:25]:<26} {r['stage']:<22} {r['elapsed_ms']:>6}  "
+              f"{r['input_chars']:>6}  {u}")
 
 
-# ── main patch function ───────────────────────────────────────────────────────
+# ── Core wrapper ──────────────────────────────────────────────────────────────
 def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_name: str):
     """
-    Wrap generate_json once to add tracing.  Call this after Cell 3 defines it:
-
-        import langfuse_config
-        generate_json = langfuse_config.patch_generate_json(
-            generate_json, STAGE_TOKEN_USAGE, SERVED_MODEL_NAME)
-
-    Works in all three modes (A/B/C) — pipeline performance is unchanged.
+    Wraps generate_json() to send one Langfuse generation per LLM call.
+    Works with both async and sync callers.
     """
-    import functools
+    import asyncio, functools
 
     @functools.wraps(generate_json_fn)
-    async def _wrapped(stage, system_prompt, user_prompt, json_schema, max_tokens=64):
+    async def _wrapped(stage: str, system_prompt: str, user_prompt: str,
+                       json_schema: dict, max_tokens: int = 64):
         t0 = time.perf_counter()
-        result = await generate_json_fn(stage, system_prompt, user_prompt, json_schema, max_tokens)
-        latency_ms = (time.perf_counter() - t0) * 1000
+        result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                        json_schema, max_tokens)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
         usage = stage_token_usage.get(stage, {})
-        p_tok = usage.get("prompt", 0)
-        c_tok = usage.get("completion", 0)
 
         if _lf is not None:
-            # Mode A or B: send to Langfuse dashboard
+            # ── Langfuse v3: one generation observation per LLM call ──────────
             try:
-                _lf.generation(
-                    name=f"judge/{stage}", model=served_model_name,
-                    session_id=_session_id,
-                    usage={"input": p_tok, "output": c_tok, "unit": "TOKENS"},
-                    metadata={"latency_ms": round(latency_ms, 1)},
-                    input={"system": system_prompt[:300], "user": user_prompt[:300]},
-                    output=result,
-                )
-            except Exception:
-                pass  # never let monitoring break the pipeline
+                with _lf.start_as_current_observation(
+                    as_type="generation",
+                    name=f"judge-{stage}",
+                    model=served_model_name,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                ) as gen:
+                    gen.update(
+                        output=result,
+                        usage={
+                            "input":  usage.get("prompt_tokens", 0),
+                            "output": usage.get("completion_tokens", 0),
+                            "total":  usage.get("total_tokens", 0),
+                        },
+                        metadata={
+                            "stage":      stage,
+                            "session_id": _session_id,
+                            "elapsed_ms": round(elapsed_ms),
+                        },
+                    )
+            except Exception as e:
+                print(f"[langfuse] trace error (non-fatal): {e}")
         else:
-            # Mode C: write to local file
-            try:
-                _log_local(stage, p_tok, c_tok, latency_ms, result, system_prompt, user_prompt)
-            except Exception:
-                pass
+            _log_local(stage, system_prompt, user_prompt, result, elapsed_ms, usage)
 
         return result
 
+    base_url_display = _url if _lf is not None else getattr(_local_log, 'name', 'langfuse_traces.jsonl')
     print(f"[langfuse] generate_json patched — mode: {_mode}  "
-          + (f"traces → {_local_trace_file.name}" if _lf is None
-         else f"dashboard → {os.environ.get('LANGFUSE_BASE_URL', os.environ.get('LANGFUSE_HOST', 'https://us.cloud.langfuse.com'))}"))
+          + (f"dashboard → {_url}" if _lf is not None else f"traces → {base_url_display}"))
     return _wrapped
 
 
 def flush():
-    """Flush any queued Langfuse traces (called automatically on process exit)."""
-    if _lf:
+    """Call after pipeline run to push any buffered traces to Langfuse."""
+    if _lf is not None:
         _lf.flush()
+        print("[langfuse] flushed.")
+    elif _local_log is not None:
+        _local_log.flush()
+        print("[langfuse] local file flushed.")
