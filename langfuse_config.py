@@ -14,7 +14,7 @@ Modes (auto-detected):
 Pipeline is completely UNCHANGED if this file is not imported.
 """
 
-import os, json, time, pathlib
+import os, json, time, pathlib, contextvars
 from datetime import datetime, timezone
 
 # ── Load .env ────────────────────────────────────────────────────────────────
@@ -22,7 +22,30 @@ try:
     from dotenv import load_dotenv
     load_dotenv(override=False)
 except ImportError:
-    pass  # python-dotenv optional
+    pass
+
+# ── Context var so brain_worker can tag each generation with its call_id ─────
+_current_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    'langfuse_call_id', default='unknown')
+
+def set_current_call_id(call_id: str):
+    """Call this in brain_worker before generate_json so traces are tagged by call."""
+    _current_call_id.set(call_id)
+
+# ── In-memory trace cache: call_id -> list of generation records ─────────────
+# This is the source for the GUI info panel regardless of cloud/local mode.
+_call_traces: dict = {}
+
+def get_call_traces(call_id: str) -> list:
+    """Return all generation records for a call_id (used by GUI /langfuse/<call_id>)."""
+    return _call_traces.get(call_id, [])
+
+def get_all_call_ids() -> list:
+    return list(_call_traces.keys())
+
+def clear_traces():
+    """Call between pipeline runs to reset the cache."""
+    _call_traces.clear()
 
 # ── Try Langfuse v3 SDK ───────────────────────────────────────────────────────
 _lf        = None
@@ -37,7 +60,7 @@ _url = os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 if _pub.startswith("pk-lf-") and _sec.startswith("sk-lf-"):
     try:
         from langfuse import get_client
-        _lf   = get_client()   # reads LANGFUSE_PUBLIC_KEY / SECRET_KEY / BASE_URL automatically
+        _lf   = get_client()
         _mode = "cloud" if "localhost" not in _url else "self-hosted"
         print(f"[langfuse] {_mode} mode active — {_url}  session={_session_id}")
     except Exception as e:
@@ -52,24 +75,14 @@ if _lf is None:
 
 
 # ── Local file helpers (Mode C) ───────────────────────────────────────────────
-def _log_local(stage, system_prompt, user_prompt, result, elapsed_ms, usage):
+def _log_local(record: dict):
     if _local_log is None:
         return
-    row = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "session": _session_id,
-        "stage": stage,
-        "input_chars": len(system_prompt) + len(user_prompt),
-        "elapsed_ms": round(elapsed_ms),
-        "usage": usage,
-        "output_keys": list(result.keys()) if isinstance(result, dict) else None,
-    }
-    _local_log.write(json.dumps(row) + "\n")
+    _local_log.write(json.dumps(record) + "\n")
     _local_log.flush()
 
 
 def show_local_traces(n=20):
-    """Print last N traces from local JSONL file."""
     p = pathlib.Path("langfuse_traces.jsonl")
     if not p.exists():
         print("No local trace file yet.")
@@ -79,34 +92,52 @@ def show_local_traces(n=20):
     if not rows:
         print("No traces recorded yet.")
         return
-    print(f"\n{'ts':<26} {'stage':<22} {'ms':>6}  {'in_ch':>6}  {'usage'}")
-    print("-" * 80)
+    print(f"\n{'ts':<26} {'call_id':<36} {'stage':<22} {'ms':>6}  {'in':>5}  {'out':>5}")
+    print("-" * 100)
     for r in rows:
         u = r.get("usage") or {}
-        print(f"{r['ts'][:25]:<26} {r['stage']:<22} {r['elapsed_ms']:>6}  "
-              f"{r['input_chars']:>6}  {u}")
+        print(f"{r['ts'][:25]:<26} {r.get('call_id','?'):<36} {r['stage']:<22} "
+              f"{r['elapsed_ms']:>6}  {u.get('input',0):>5}  {u.get('output',0):>5}")
 
 
 # ── Core wrapper ──────────────────────────────────────────────────────────────
 def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_name: str):
     """
-    Wraps generate_json() to send one Langfuse generation per LLM call.
-    Works with both async and sync callers.
+    Wraps generate_json() to:
+      1. Send one Langfuse generation per LLM call (cloud or local file)
+      2. Cache the record in _call_traces[call_id] for the GUI info panel
     """
     import asyncio, functools
 
     @functools.wraps(generate_json_fn)
     async def _wrapped(stage: str, system_prompt: str, user_prompt: str,
                        json_schema: dict, max_tokens: int = 64):
+        call_id = _current_call_id.get()
         t0 = time.perf_counter()
         result = await generate_json_fn(stage, system_prompt, user_prompt,
                                         json_schema, max_tokens)
         elapsed_ms = (time.perf_counter() - t0) * 1000
 
         usage = stage_token_usage.get(stage, {})
+        record = {
+            "ts":          datetime.now(timezone.utc).isoformat(),
+            "call_id":     call_id,
+            "session_id":  _session_id,
+            "stage":       stage,
+            "model":       served_model_name,
+            "elapsed_ms":  round(elapsed_ms),
+            "usage": {
+                "input":   usage.get("prompt_tokens", 0),
+                "output":  usage.get("completion_tokens", 0),
+                "total":   usage.get("total_tokens", 0),
+            },
+            "output": result,
+        }
+
+        # ── cache for GUI panel (always, regardless of mode) ─────────────────
+        _call_traces.setdefault(call_id, []).append(record)
 
         if _lf is not None:
-            # ── Langfuse v3: one generation observation per LLM call ──────────
             try:
                 with _lf.start_as_current_observation(
                     as_type="generation",
@@ -120,31 +151,31 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
                     gen.update(
                         output=result,
                         usage={
-                            "input":  usage.get("prompt_tokens", 0),
-                            "output": usage.get("completion_tokens", 0),
-                            "total":  usage.get("total_tokens", 0),
+                            "input":  record["usage"]["input"],
+                            "output": record["usage"]["output"],
+                            "total":  record["usage"]["total"],
                         },
                         metadata={
                             "stage":      stage,
+                            "call_id":    call_id,
                             "session_id": _session_id,
-                            "elapsed_ms": round(elapsed_ms),
+                            "elapsed_ms": record["elapsed_ms"],
                         },
                     )
             except Exception as e:
                 print(f"[langfuse] trace error (non-fatal): {e}")
         else:
-            _log_local(stage, system_prompt, user_prompt, result, elapsed_ms, usage)
+            _log_local(record)
 
         return result
 
-    base_url_display = _url if _lf is not None else getattr(_local_log, 'name', 'langfuse_traces.jsonl')
     print(f"[langfuse] generate_json patched — mode: {_mode}  "
-          + (f"dashboard → {_url}" if _lf is not None else f"traces → {base_url_display}"))
+          + (f"dashboard -> {_url}" if _lf is not None
+             else f"traces -> {getattr(_local_log, 'name', 'langfuse_traces.jsonl')}"))
     return _wrapped
 
 
 def flush():
-    """Call after pipeline run to push any buffered traces to Langfuse."""
     if _lf is not None:
         _lf.flush()
         print("[langfuse] flushed.")

@@ -189,6 +189,30 @@ PAGE = r"""<!DOCTYPE html>
   .chip.sent   { background:rgba(110,118,129,.3); color:var(--dim); }
   .chip.time   { background:rgba(110,118,129,.18); color:var(--dim); font-weight:500; }
 
+
+  /* ── langfuse info panel ─────────────────────────────────────── */
+  .lf-btn { margin-left:10px; padding:3px 10px; font-size:11px; font-weight:600;
+    background:none; border:1px solid var(--line); border-radius:4px;
+    color:var(--dim); cursor:pointer; vertical-align:middle; }
+  .lf-btn:hover { color:var(--text); border-color:var(--dim); }
+  .lf-btn.loading { opacity:.5; pointer-events:none; }
+  .lf-panel { display:none; border-top:1px solid var(--line);
+    padding:12px 16px; font-size:12px; }
+  .lf-panel.open { display:block; }
+  .lf-section { margin-bottom:14px; }
+  .lf-section-title { font-size:10px; font-weight:700; letter-spacing:.8px;
+    color:var(--dim); text-transform:uppercase; margin-bottom:6px; }
+  .lf-kv { display:grid; grid-template-columns:180px 1fr;
+    gap:3px 12px; color:var(--text); }
+  .lf-kv .k { color:var(--dim); }
+  .lf-table { width:100%; border-collapse:collapse; font-size:11px; }
+  .lf-table th { text-align:left; color:var(--dim); font-weight:600;
+    padding:3px 8px; border-bottom:1px solid var(--line); }
+  .lf-table td { padding:3px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+  .lf-table tr:hover td { background:rgba(255,255,255,.03); }
+  .lf-verdict { font-family:monospace; font-size:10px; color:var(--dim);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+  .lf-no-data { color:var(--dim); font-size:12px; padding:8px 0; }
   /* skipped-segment panel — collapsible at the bottom of each call.
      Color-coded by reason so the supervisor can triage at a glance:
      grey=silence (almost certainly fine), amber=censor beep (redacted PII, fine),
@@ -412,6 +436,96 @@ function refreshSkipPanel(callId) {
 const fadeTimers = {};
 
 /* ---------- panel factory ---------- */
+/* ---------- langfuse info panel ---------- */
+async function toggleLangfuse(callId) {
+  const callDiv = calls[callId];
+  if (!callDiv) return;
+  const panel = callDiv.querySelector('.lf-panel');
+  const btn   = callDiv.querySelector('.lf-btn');
+  if (panel.classList.contains('open')) {
+    panel.classList.remove('open');
+    btn.textContent = 'info';
+    return;
+  }
+  btn.classList.add('loading');
+  btn.textContent = 'loading...';
+  try {
+    const r   = await fetch(base + 'langfuse/' + callId);
+    const dat = await r.json();
+    renderLangfuse(panel, dat.records || []);
+  } catch(e) {
+    panel.innerHTML = '<div class="lf-no-data">Could not load Langfuse data: ' + e + '</div>';
+  }
+  btn.classList.remove('loading');
+  btn.textContent = 'info';
+  panel.classList.add('open');
+}
+
+function renderLangfuse(panel, records) {
+  if (!records.length) {
+    panel.innerHTML = '<div class="lf-no-data">No Langfuse data yet — run a call first.</div>';
+    return;
+  }
+  const totalIn  = records.reduce((s,r) => s + (r.usage?.input  || 0), 0);
+  const totalOut = records.reduce((s,r) => s + (r.usage?.output || 0), 0);
+  const totalMs  = records.reduce((s,r) => s + (r.elapsed_ms || 0), 0);
+  const avgMs    = records.length ? Math.round(totalMs / records.length) : 0;
+
+  // stage breakdown
+  const stages = {};
+  records.forEach(r => {
+    const s = stages[r.stage] || {count:0, ms:0, input:0, output:0};
+    s.count++; s.ms += r.elapsed_ms||0;
+    s.input += r.usage?.input||0; s.output += r.usage?.output||0;
+    stages[r.stage] = s;
+  });
+
+  let stageRows = '';
+  Object.entries(stages).forEach(([stage, s]) => {
+    stageRows += '<tr><td>' + stage + '</td><td>' + s.count + '</td>' +
+      '<td>' + Math.round(s.ms/s.count) + ' ms avg</td>' +
+      '<td>' + s.input + '</td><td>' + s.output + '</td></tr>';
+  });
+
+  let genRows = '';
+  records.forEach((r, i) => {
+    const verdict = r.output ? JSON.stringify(r.output).slice(0,80) : '-';
+    genRows += '<tr>' +
+      '<td>' + (i+1) + '</td>' +
+      '<td>' + r.stage + '</td>' +
+      '<td>' + (r.elapsed_ms||0) + ' ms</td>' +
+      '<td>' + (r.usage?.input||0) + '</td>' +
+      '<td>' + (r.usage?.output||0) + '</td>' +
+      '<td class="lf-verdict" title="' + verdict.replace(/"/g,'&quot;') + '">' + verdict + '</td>' +
+    '</tr>';
+  });
+
+  panel.innerHTML =
+    '<div class="lf-section">' +
+      '<div class="lf-section-title">Token Usage</div>' +
+      '<div class="lf-kv">' +
+        '<span class="k">Input tokens</span><span>' + totalIn + '</span>' +
+        '<span class="k">Output tokens</span><span>' + totalOut + '</span>' +
+        '<span class="k">Total tokens</span><span>' + (totalIn+totalOut) + '</span>' +
+        '<span class="k">LLM calls</span><span>' + records.length + '</span>' +
+        '<span class="k">Avg judge latency</span><span>' + avgMs + ' ms</span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="lf-section">' +
+      '<div class="lf-section-title">By Stage</div>' +
+      '<table class="lf-table"><thead><tr>' +
+        '<th>Stage</th><th>Calls</th><th>Latency</th><th>In tokens</th><th>Out tokens</th>' +
+      '</tr></thead><tbody>' + stageRows + '</tbody></table>' +
+    '</div>' +
+    '<div class="lf-section">' +
+      '<div class="lf-section-title">Generations</div>' +
+      '<table class="lf-table"><thead><tr>' +
+        '<th>#</th><th>Stage</th><th>Latency</th><th>In</th><th>Out</th><th>Verdict</th>' +
+      '</tr></thead><tbody>' + genRows + '</tbody></table>' +
+    '</div>';
+}
+
+
 function panel(callId) {
   if (!calls[callId]) {
     const div = document.createElement('div');
@@ -419,6 +533,7 @@ function panel(callId) {
     div.dataset.cid = callId;
     div.innerHTML =
       '<h2>CALL ' + callId +
+        '<button class="lf-btn" onclick="toggleLangfuse(\''+callId+'\')">info</button>' +
         '<button class="override-btn" style="display:none"' +
           ' onclick="handleOverride(\'' + callId + '\')">⚡ OVERRIDE</button>' +
         '<audio controls preload="metadata" src="' + base + 'audio/' + callId + '"' +
@@ -437,6 +552,7 @@ function panel(callId) {
           '<div class="plabel">Customer</div></div>' +
       '</div>' +
       '<div class="turns"></div>' +
+      '<div class="lf-panel"><div class="lf-no-data">Run a call to see Langfuse data.</div></div>' +
       '<div class="skip-panel">' +
         '<div class="skip-header" onclick="' +
             'this.classList.toggle(\'open\');' +
@@ -558,6 +674,17 @@ async def receive_event(event: dict):
     for ws in dead:
         CONNECTED.discard(ws)
     return {"ok": True, "clients": len(CONNECTED)}
+
+
+@app.get("/langfuse/{call_id}")
+async def langfuse_data(call_id: str):
+    """Return cached Langfuse generation records for a call."""
+    try:
+        import langfuse_config as _lfc
+        records = _lfc.get_call_traces(call_id)
+    except Exception:
+        records = []
+    return JSONResponse({"call_id": call_id, "records": records})
 
 
 @app.get("/")
