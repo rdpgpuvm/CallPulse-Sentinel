@@ -180,6 +180,148 @@ Each LLM judge call costs roughly:
 
 See Cell 9 (results) for exact counts after each run.
 
+
+## Architecture & Pipeline Flow
+
+```
+AUDIO FILE (WAV/MP3/FLAC)
+        |
+        v
+  ┌─────────────────────────────────────────────────────────┐
+  │  CELL 4 — Audio Discovery                               │
+  │  AUDIO_DIRS = [call_recordings/, scam_call/]            │
+  │  collect_audio() scans all dirs, builds stem->path map  │
+  └─────────────────┬───────────────────────────────────────┘
+                    |
+        ┌───────────┴───────────┐
+        │ REALTIME_SINGLE_CALL  │  SELECTED_CALL_IDS
+        │  True  = 1 call, 1x  │  ""  = random / all
+        │  False = bulk, flat  │  "x" = that recording
+        └───────────┬───────────┘
+                    |
+  ┌─────────────────v───────────────────────────────────────┐
+  │  STEP 1 — EARS (ears_producer)                          │
+  │                                                         │
+  │  FILE MODE (bulk / accurate)                            │
+  │    faster-whisper large-v3-turbo, CPU int8              │
+  │    beam_size=5, temperature=[0.0,0.2,0.4]               │
+  │    Full channel transcription, VAD-segmented            │
+  │    quality_gated(): drops no_speech_prob>0.5,           │
+  │      avg_logprob<-1.0, compression_ratio>2.4            │
+  │                                                         │
+  │  LIVE MODE (real-time simulation)                       │
+  │    whisper-large-v3-turbo fp16 on GPU (ROCm)            │
+  │    5s chunks, deadline pacing, ~150-400ms/chunk         │
+  │    RMS gate: skip silence (<1e-4 abs mean)              │
+  │    FFT gate: skip beep tones (spectral entropy<0.3)     │
+  │    Fallback: CPU int8 if GPU unavailable                │
+  │                                                         │
+  │  Emits: skip events (silence/beep/low-conf/repetition)  │
+  └────────────────────┬────────────────────────────────────┘
+                       | asyncio.Queue (zero-copy, µs handoff)
+                       | utterance: {call_id, speaker, text,
+                       |             audio_start_s, asr_ms}
+  ┌────────────────────v────────────────────────────────────┐
+  │  STEP 2 — BRAIN (brain_worker, 1 per call)              │
+  │                                                         │
+  │  Semaphore(16): max concurrent LLM requests             │
+  │  3-turn rolling context window (token budget)           │
+  │                                                         │
+  │  Fast-path (skip judge):                                │
+  │    utterance <= 12 chars AND no regex hints             │
+  │    ~20% of turns, saves ~350 tokens + ~300ms each       │
+  │    role carried from last judge call for that channel   │
+  │                                                         │
+  │  LLM JUDGE — Qwen3-4B via vLLM                         │
+  │  ┌──────────────────────────────────────────────────┐   │
+  │  │  Model: Qwen/Qwen3-4B-Instruct-2507              │   │
+  │  │  Served as: call-moderator-llm                   │   │
+  │  │  Port: 8000, temperature=0 (greedy, reproducible)│   │
+  │  │  max_tokens=48, guided JSON (grammar-constrained) │   │
+  │  │  GPU memory utilization: auto-fitted              │   │
+  │  │  max_model_len: 16384                             │   │
+  │  │                                                   │   │
+  │  │  Input:  system prompt (~300 tokens, fixed)       │   │
+  │  │          + 3-turn context (~100 tokens)           │   │
+  │  │          + latest utterance (~30 tokens)          │   │
+  │  │  Output: {speaker, sentiment, violations, reason} │   │
+  │  │          ~32-48 tokens, single pass, no retries   │   │
+  │  │                                                   │   │
+  │  │  speaker: "rep"|"customer"  (content-based,       │   │
+  │  │           works on mono and stereo recordings)    │   │
+  │  │  sentiment: -2..2  (customer only)                │   │
+  │  │  violations: [code, ...]  (policy codes)          │   │
+  │  │  reason: string, max 60 chars                     │   │
+  │  └──────────────────────────────────────────────────┘   │
+  │                                                         │
+  │  Deterministic escalation rules (no LLM, instant):      │
+  │    Rule 1: any critical violation                        │
+  │    Rule 2: >= 2 high-severity violations                 │
+  │    Rule 3: 2 consecutive customer sentiment <= -2        │
+  └────────────────────┬────────────────────────────────────┘
+                       | asyncio.Queue (zero-copy)
+                       | alert: {call_id, rule, detail,
+                       |         audio_start_s, latencies}
+  ┌────────────────────v────────────────────────────────────┐
+  │  STEP 3 — ALARM (alarm_consumer, shared)                │
+  │  flush=True print (instant visual signal)               │
+  │  sqlite :memory: audit trail (turns + alerts)           │
+  │  emit_event() -> GUI dashboard (httpx, 2s timeout)      │
+  └────────────────────┬────────────────────────────────────┘
+                       |
+  ┌────────────────────v────────────────────────────────────┐
+  │  GUI DASHBOARD (gui_server.py, port 7860)               │
+  │  Starlette + WebSocket, event-driven                    │
+  │  Per-call tabs, speaker indicators, turn log            │
+  │  Escalation panel: expand items, seek audio             │
+  │  Skip panel: silence/PII-beep/low-conf segments         │
+  │  Override flow: OVERRIDE -> review -> JOIN CALL          │
+  │  Audio sync: seeks player to turn timestamp             │
+  │  Info panel: Langfuse token usage per call              │
+  │  Simple mode: minimal UI for non-technical supervisors  │
+  └─────────────────────────────────────────────────────────┘
+```
+
+## LLM Usage — Patterns, Frequency and Settings
+
+### When the LLM is called
+
+The LLM judge (Qwen3-4B via vLLM) is called once per utterance that passes the fast-path gate. The fast-path skips utterances that are 12 characters or fewer with no keyword hits — typically acknowledgements like "Okay.", "Yes.", "Sure." — which account for roughly 20 % of turns in a real call.
+
+For a typical 5-minute call with two speakers and 5-second chunks, expect 30-60 LLM calls per call. In bulk mode all calls run concurrently and vLLM batches their requests internally.
+
+### Token budget per call
+
+| Component            | Tokens (approx) |
+|----------------------|-----------------|
+| System prompt        | ~300 (fixed, cached by --enable-prefix-caching) |
+| 3-turn context       | ~60-150          |
+| Latest utterance     | ~10-50           |
+| Total input          | ~370-500         |
+| Output (verdict)     | ~32-48           |
+
+With prefix caching enabled the 300-token system prompt is computed once and reused for every judge call, cutting prefill cost by ~60-70 %.
+
+### vLLM server settings
+
+| Setting                    | Value          | Reason |
+|----------------------------|----------------|--------|
+| Model                      | Qwen3-4B-Instruct-2507 | 4B fits in shared VRAM with Whisper |
+| temperature                | 0              | Greedy decoding — same transcript always produces same verdict (audit reproducibility) |
+| max_tokens                 | 48             | Reason field capped at 60 chars in schema; 48 decode tokens sufficient |
+| guided_json                | schema         | Grammar-constrains output during decoding — eliminates JSON repair retries |
+| gpu_memory_utilization     | auto-fitted    | Script reserves ~7 GiB for Whisper, vLLM gets the rest |
+| max_model_len              | 16384          | Upper bound on context; actual prompts are ~500 tokens |
+| Semaphore                  | 16             | Client-side concurrency cap matching vLLM scheduler budget |
+
+### Speaker identification via LLM
+
+Rather than a channel-index heuristic (which breaks on mono recordings), the judge identifies the speaker from content as part of its single JSON output. The `speaker` field costs no additional latency — it rides the same forward pass that produces sentiment and violations. The judge has the 3-turn labeled context to anchor its decision.
+
+### Langfuse observability
+
+Every LLM call is instrumented via `langfuse_config.py`. Token counts, latency, stage, and verdict are recorded per call. The GUI info panel fetches this from an in-memory cache (zero network latency) and displays token usage, per-stage breakdown, and a per-generation table. The same data is forwarded to the Langfuse cloud dashboard asynchronously without affecting pipeline latency.
+
 ## Performance & Efficiency Design
 
 The pipeline was built to be resource-conscious without sacrificing accuracy. Every architectural choice has a specific reason.
