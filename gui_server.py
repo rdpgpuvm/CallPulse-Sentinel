@@ -454,7 +454,7 @@ function panel(callId) {
 
     const tab = document.createElement('button');
     tab.className = 'tab'; tab.dataset.cid = callId;
-    tab.textContent = 'CALL ' + callId.slice(0, 10) + '…';
+    tab.textContent = callId.length > 16 ? callId.slice(-16) : callId;
     tab.onclick = () => selectCall(callId);
     document.getElementById('tabs').appendChild(tab);
 
@@ -526,6 +526,12 @@ function render(ev) {
       if (tab) tab.classList.add('alerted');
     }
 
+  } else if (ev.type === 'call_end') {
+    const tab = document.querySelector('.tab[data-cid="' + ev.call_id + '"]');
+    if (tab) { tab.style.opacity = '0.55'; tab.title = 'Call finished'; }
+    const p = panel(ev.call_id);
+    const st = p.querySelector('.call-status');
+    if (st) st.textContent = 'done';
   } else if (ev.type === 'skip') {
     panel(ev.call_id);   /* ensure panel exists */
     callData[ev.call_id].skips.push(ev);
