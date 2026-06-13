@@ -1,67 +1,173 @@
-# AI Call Moderator v7 — Supervisor Override + Skip Validation
+# AI Call Moderator — Real-Time Compliance Pipeline
 
-v7 builds on the v6 deadline-pacing pipeline with two new supervisor tools:
+A two-model pipeline that monitors live call center calls for policy violations.
+**Whisper** (ASR) transcribes audio; **Qwen3-4B-Instruct** (LLM judge via vLLM on AMD GPU)
+flags violations in under one second. A live FastAPI/WebSocket dashboard gives supervisors
+override controls, audio seeking, and escalation review.
 
-## New in v7
+---
 
-### ⚡ Supervisor Override with Escalation Jump
+## Quick Start
 
-When a call is escalated, an **OVERRIDE** button appears in the call header. Clicking it:
-1. Reveals a list of all escalated segments with their **audio timestamps** (`mm:ss`)
-2. Clicking any item **seeks the audio player** to that exact moment — so the supervisor can hear the context before joining
-3. After clicking override, a **👥👥 SUPERVISING** badge appears in the center of the global header, indicating three parties are on the call (simulation)
+```bash
+# Clone the branch you want
+git clone -b v7      https://github.com/rdpgpuvm/Project1.git /workspace/CallModV7
+git clone -b vosktest https://github.com/rdpgpuvm/Project1.git /workspace/CallModVosk
 
-### ⚠️ Skipped Segment Validation Panel
+# Start vLLM + GUI dashboard (leave this terminal running)
+cd /workspace/CallModV7
+bash run_vllm_server.sh
 
-Every chunk the ASR pipeline silently dropped is now listed in a collapsible panel at the bottom of each call:
-- **silence** — RMS below threshold (almost certainly fine)
-- **beep** — tone-dominated spectrum (censor bleep / redacted PII)
-- **no_speech** — Whisper's own confidence gate said P(no_speech) > 0.5
-- **low_confidence** — avg_logprob < -1.0 (very uncertain decode)
-- **repetition** — compression_ratio > 2.4 (hallucination loop)
+# Then run call_moderator_v5_gui.ipynb cell by cell in Tab 2
+```
 
-Clicking any item seeks the audio to that timestamp so a supervisor can **validate by ear** whether the skip was genuine silence/beep or potentially missed speech.
+---
 
-### Architecture additions
+## Branch Differences
 
-- `audio_start_s` added to all `turn`, `alert`, and new `skip` events — the audio offset in seconds so the UI can seek without any server-side mapping
-- `quality_gated()` now returns `(good_segs, skipped_info)` — the skipped list flows to the GUI rather than being silently discarded
-- Skip events emitted inline in `ears_producer` for live-mode silence/beep/no_speech, and from `quality_gated` for file-mode per-segment rejects
+| | v7 | vosktest |
+|---|---|---|
+| ASR | whisper-large-v3-turbo (CPU int8 file / GPU fp16 live) | Vosk/Kaldi CPU-only |
+| GPU for ASR | Optional (GPU fp16 live mode) | Never — 100% CPU |
+| GPU for LLM | Always (vLLM AMD ROCm) | Always (vLLM AMD ROCm) |
+| When to use | Best accuracy | GPU-constrained / CPU-only fallback |
+
+---
+
+## Supervisor Override UI
+
+When a call escalates, the **⚡ OVERRIDE** button appears:
+1. Click it → escalation list drops down with audio timestamps
+2. Click any item → audio seeks to that exact moment
+3. Expand `+ show` → see the exact transcript text that triggered the flag
+4. Click **✅ JOIN CALL** → supervisor indicator activates globally
+
+In **Simple mode** the escalation panel auto-opens on escalation — no click required.
+
+**Audio sync:** enable the **Sync audio** checkbox so the audio seeker follows each incoming turn automatically.
+
+---
+
+## Skipped-Segment Panel
+
+Every chunk the ASR pipeline silently dropped appears in a collapsible panel:
+
+| Tag | Meaning |
+|---|---|
+| `silence` | RMS below threshold — almost certainly fine |
+| `beep` | Tone-dominated spectrum — censor bleep / redacted PII |
+| `no_speech` | Whisper P(no_speech) > 0.5 |
+| `low_confidence` | avg_logprob < −1.0 (uncertain decode) |
+| `repetition` | compression_ratio > 2.4 (hallucination loop) |
+
+Click any item to seek audio and validate by ear.
+
+---
+
+## Monitoring with Langfuse (optional — three modes, no account required)
+
+Langfuse tracks token usage, latency, and LLM verdicts per call.
+**You do not need a Langfuse account.** Choose any of the three modes below.
+
+### Mode A — Self-hosted Docker (recommended, no account, full dashboard)
+
+Run Langfuse on your own machine. Completely free and private.
+
+```bash
+# One-time setup — starts Langfuse at http://localhost:3000
+docker run -d --name langfuse \
+  -p 3000:3000 \
+  -e NEXTAUTH_SECRET=change-me-secret \
+  -e SALT=change-me-salt \
+  -e DATABASE_URL=file:/data/langfuse.db \
+  -v langfuse_data:/data \
+  langfuse/langfuse:latest
+```
+
+Then open **http://localhost:3000** → Create project → Settings → API Keys.
+Copy the public + secret key into `.env`:
+
+```bash
+cp .env.example .env
+# Edit .env and fill in your keys + set:
+# LANGFUSE_HOST=http://localhost:3000
+```
+
+### Mode B — Langfuse cloud (free tier, account at langfuse.com)
+
+```bash
+cp .env.example .env
+# Fill in LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY from langfuse.com
+# Leave LANGFUSE_HOST commented out (defaults to cloud)
+```
+
+### Mode C — Local file logging (zero setup, zero dependencies, always works)
+
+**No Docker, no account, no `.env` file needed.** Just run the optional Cell 7 in the notebook
+and every LLM call is logged to `langfuse_traces.jsonl` in the repo root.
+
+To view traces in the notebook:
+```python
+import langfuse_config
+langfuse_config.show_local_traces()   # prints last 20 calls with token counts
+```
+
+### Activating monitoring (all modes)
+
+Run the optional **Cell 7** in the notebook after Cell 3:
+
+```python
+import langfuse_config
+generate_json = langfuse_config.patch_generate_json(
+    generate_json, STAGE_TOKEN_USAGE, SERVED_MODEL_NAME)
+```
+
+The pipeline is **unchanged** whether you run Cell 7 or not.
+`langfuse_config.py` detects which mode to use automatically:
+- Keys found in `.env` → Mode A or B (dashboard)
+- No keys → Mode C (local file)
+
+---
 
 ## Recordings included
 
-Five real call-center recordings from the [Unidata Call Center Audio Dataset](https://www.kaggle.com/datasets/unidpro/call-center-audio) (CC BY-NC-ND 4.0):
+| Folder | Files | Source |
+|---|---|---|
+| `call_recordings/` | 5 FLAC files (Amazon, Ubereats, Prezzee, Paramount+, Spin) | [Kaggle unidpro/call-center-audio](https://www.kaggle.com/datasets/unidpro/call-center-audio) |
+| `scam_call/` | 4 WAV files | Committed scam call recordings |
 
-| File | Company | Duration | Escalation signals |
-|---|---|---|---|
-| `CA769e290725c8cb356344c837470375f2.flac` | Amazon | 26 min | 🔴 Repeated refund denials, customer frustration → **sentiment rule** |
-| `CA4950c1c8c305cc85c5f5f040229fe608.flac` | Ubereats | 10 min | 🟡 Refund dispute |
-| `CA0fe99171c6dec5c26dbe5fa5d10c863a.flac` | Prezzee | 15 min | 🟡 Cancellation |
-| `CA5f229fc25030bdc650d548bdcf95780f.flac` | Paramount Plus | 7 min | 🟡 Cancellation |
-| `CA3e0c1114f78be6bd450860973c404dba.flac` | Spin | 5 min | 🟡 Refund |
+Best for testing override UI: `CA769e290725c8cb356344c837470375f2` (Amazon, 26 min) —
+set `SELECTED_CALL_ID` in Cell 8 to target it.
 
-**Best for testing override UI:** use `CA769e290725c8cb356344c837470375f2` (Amazon, 26 min) — the customer's persistent frustration about missing refunds across multiple orders is likely to trigger the sentiment-based escalation rule (rule 3: sentiment ≤ −2 two turns in a row).
+---
 
-For additional recordings with escalatable content (angry customers, rep misconduct), the original dataset is at:
-- **Kaggle**: https://www.kaggle.com/datasets/unidpro/call-center-audio (CC BY-NC-ND 4.0)
-- **PissedConsumer**: https://www.pissedconsumer.com/call-recordings.html (source of transcripts)
+## Architecture
 
-## How to run
-
-Same as v5/v6 — one terminal for vLLM, one for the notebook:
-
-```bash
-git clone -b v7 https://github.com/rdpgpuvm/Project1.git /workspace/CallModV7
-cd /workspace/CallModV7/v5 && bash run_vllm_server.sh
+```
+Audio file / live stream
+        │
+        ▼
+  ┌─────────────┐    asyncio.Queue    ┌──────────────────┐   asyncio.Queue   ┌──────────┐
+  │  THE EARS   │ ─────────────────▶  │   THE BRAIN      │ ────────────────▶ │THE ALARM │
+  │  ASR model  │  (zero-copy µs)     │  Qwen3-4B-Instr  │  (zero-copy µs)  │ + GUI    │
+  │  CPU/GPU    │                     │  vLLM AMD ROCm   │                   │ sqlite   │
+  └─────────────┘                     │  guided JSON     │                   └──────────┘
+                                      │  Semaphore(16)   │
+                                      └──────────────────┘
 ```
 
-Then run `call_moderator_v5_gui.ipynb` cell by cell. Set `SELECTED_CALL_ID = "CA769e290725c8cb356344c837470375f2"` in CELL 8 to target the Amazon recording for the best chance of seeing the override panel.
+- **asyncio.Queue** — zero-copy ~µs handshakes between stages
+- **guided JSON** — grammar-constrains LLM output at decode time, eliminates JSON retries
+- **Semaphore(16)** — caps concurrent LLM requests, keeps GPU saturated without socket thrash
+- **temperature=0** — greedy decode, reproducible verdicts for compliance audit
 
-## Architecture is unchanged (accuracy + speed preserved)
+---
 
-All v6 optimizations carry forward:
-- Deadline pacing (chunk k releases at `stream_start + k*5s`)
-- GPU STT warm-up at load (pre-pays the 24.8s ONNX kernel-compile cost)
-- CPU faster-whisper int8 fallback
+## Token usage (what the numbers mean)
 
-v7 adds zero overhead to the moderation pipeline — `audio_start_s` is a free field copy, and skip events are fire-and-forget (same `emit_event` path already used for turns/alerts).
+Each LLM judge call costs roughly:
+- **~300 prompt tokens** — system prompt (policy definitions) + 3-turn context
+- **~25 completion tokens** — the JSON verdict: `{"sentiment":-1,"violations":["C2"],"reason":"..."}`
+- **~325 total per turn**
+
+See Cell 9 (results) for exact counts after each run.
