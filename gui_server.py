@@ -124,6 +124,12 @@ PAGE = r"""<!DOCTYPE html>
   .esc-item .esc-rule { color:#ffa198; flex:1; font-size:12.5px; }
   .esc-item .esc-seek { color:var(--dim); font-size:11px; }
   .esc-item:hover .esc-seek { color:var(--repglow); }
+  .esc-join-btn { display:block; margin:10px 12px 6px;
+    background:#238636; color:#fff; border:none; border-radius:8px;
+    padding:8px 18px; font-size:13px; font-weight:700; cursor:pointer;
+    letter-spacing:.4px; }
+  .esc-join-btn:hover { filter:brightness(1.15); }
+  .esc-join-btn:disabled { background:#30363d; color:var(--dim); cursor:default; }
 
   .banner { background:var(--bad); color:#fff; padding:10px 16px; font-weight:700;
             font-size:13px; animation:flash 1s linear 6; }
@@ -211,7 +217,7 @@ PAGE = r"""<!DOCTYPE html>
   <span class="dot" id="dot"></span>
   <span id="status">connecting&hellip;</span>
   <span id="supervising" title="Supervisor has joined the call">&#128101;&#128101; SUPERVISING</span>
-  <button class="hbtn" id="cleanToggle">&#10024; Clean mode</button>
+  <button class="hbtn" id="cleanToggle">Simple</button>
 </header>
 <div id="tabs"></div>
 <div id="calls"></div>
@@ -290,20 +296,35 @@ function seekTo(callId, seconds) {
 }
 
 /* ---------- override handler ----------
-   First click: latch supervising state + show 3-person icon in global header.
-   Subsequent clicks: toggle the escalation list open/closed.                  */
+   First click: open the escalation panel so manager can seek & review each
+   flagged segment before deciding to join.  Does NOT mark as supervising yet —
+   that requires a deliberate "JOIN CALL" click inside the panel.
+   Subsequent clicks: toggle the panel open/closed.                            */
 function handleOverride(callId) {
-  const cd    = callData[callId];
   const p     = calls[callId];
   const btn   = p.querySelector('.override-btn');
   const panel = p.querySelector('.esc-panel');
-  panel.classList.toggle('open');
-  if (!cd.overridden) {
-    cd.overridden = true;
-    btn.classList.add('supervising');
-    btn.textContent = '✅ SUPERVISING';
-    document.getElementById('supervising').classList.add('active');
+  const isOpen = panel.classList.toggle('open');
+  /* Button label reflects review state (not supervising yet) */
+  if (!callData[callId].overridden) {
+    btn.textContent = isOpen ? '🔍 REVIEWING...' : '⚡ OVERRIDE';
   }
+}
+
+/* ---------- join call (called from JOIN CALL button inside esc-panel) ----------
+   Separate from handleOverride so manager must consciously confirm after review. */
+function joinCall(callId) {
+  const cd  = callData[callId];
+  if (cd.overridden) return;          /* idempotent */
+  cd.overridden = true;
+  const p   = calls[callId];
+  const btn = p.querySelector('.override-btn');
+  btn.classList.add('supervising');
+  btn.textContent = '✅ SUPERVISING';
+  /* disable the JOIN button so it can't be double-clicked */
+  const joinBtn = p.querySelector('.esc-join-btn');
+  if (joinBtn) { joinBtn.disabled = true; joinBtn.textContent = '✅ Joined'; }
+  document.getElementById('supervising').classList.add('active');
 }
 
 /* ---------- escalation list ---------- */
@@ -367,8 +388,9 @@ function panel(callId) {
           ' title="play/pause/seek — unsynced with live analysis"></audio>' +
       '</h2>' +
       '<div class="esc-panel">' +
-        '<div class="esc-panel-title">⚠️ Escalated segments &mdash; click any to seek audio</div>' +
+        '<div class="esc-panel-title">⚠️ Escalated segments — click any to seek &amp; review audio before joining</div>' +
         '<div class="esc-items"></div>' +
+        '<button class="esc-join-btn" onclick="joinCall(\'' + callId + '\')">✅ JOIN CALL — take over</button>' +
       '</div>' +
       '<div class="stage">' +
         '<div class="person rep"><span class="figure">🧑‍💼</span>' +
