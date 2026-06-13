@@ -26,8 +26,17 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> [1/5] Installing requirements (torch untouched: ROCm build already present)"
 python3 -m pip install -q --root-user-action=ignore \
-    openai mcp httpx faster-whisper librosa soundfile numpy pandas scipy uvicorn
+    openai mcp httpx faster-whisper librosa soundfile numpy pandas scipy uvicorn langfuse
 python3 -m pip install -q --root-user-action=ignore "starlette<0.49"
+
+# ── load Langfuse keys from .env if present (optional — no-op if missing) ──
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    echo "    Loading Langfuse config from .env"
+    set -a; source "${SCRIPT_DIR}/.env"; set +a
+else
+    echo "    No .env found — Langfuse monitoring inactive"
+    echo "    (copy .env.example -> .env and fill in keys to enable)"
+fi
 
 echo "==> [2/5] Sanity-checking vLLM imports"
 python3 - <<'PY'

@@ -1,3 +1,6 @@
 .DS_Store
 kaggle_call_data/
 .ipynb_checkpoints/
+
+# Langfuse keys — never commit
+.env

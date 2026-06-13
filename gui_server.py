@@ -124,6 +124,16 @@ PAGE = r"""<!DOCTYPE html>
   .esc-item .esc-rule { color:#ffa198; flex:1; font-size:12.5px; }
   .esc-item .esc-seek { color:var(--dim); font-size:11px; }
   .esc-item:hover .esc-seek { color:var(--repglow); }
+  .esc-expand { font-size:11px; color:var(--dim); cursor:pointer;
+                padding:1px 7px; border:1px solid var(--line);
+                border-radius:6px; background:none; white-space:nowrap; }
+  .esc-expand:hover { color:var(--text); border-color:var(--dim); }
+  .esc-text-block { display:none; padding:6px 10px 2px;
+                    font-size:12px; color:var(--text); line-height:1.5;
+                    border-left:2px solid var(--bad); margin:4px 0 2px 4px; }
+  .esc-text-block.open { display:block; }
+  /* in simple mode auto-open the esc-panel so escalations are always visible */
+  body.clean .esc-panel.escalated-open { display:block; }
   .esc-join-btn { display:block; margin:10px 12px 6px;
     background:#238636; color:#fff; border:none; border-radius:8px;
     padding:8px 18px; font-size:13px; font-weight:700; cursor:pointer;
@@ -339,17 +349,33 @@ function joinCall(callId) {
 function refreshEscList(callId) {
   const items = calls[callId].querySelector('.esc-items');
   items.innerHTML = '';
-  callData[callId].escalations.forEach(esc => {
+  callData[callId].escalations.forEach((esc, idx) => {
+    /* row: timestamp | turn | rule | expand btn | seek btn */
     const item = document.createElement('div');
     item.className = 'esc-item';
-    item.title = 'Seek audio to ' + fmtTime(esc.audio_start_s) + ' to review before joining';
+    const textId = 'esc-txt-' + callId + '-' + idx;
     item.innerHTML =
-      '<span class="esc-ts">' + fmtTime(esc.audio_start_s) + '</span>' +
+      '<span class="esc-ts">'  + fmtTime(esc.audio_start_s) + '</span>' +
       '<span class="esc-turn">t' + esc.turn_number + '</span>' +
       '<span class="esc-rule">' + (esc.rule || '') + '</span>' +
-      '<span class="esc-seek">▶ seek</span>';
-    item.onclick = () => seekTo(callId, esc.audio_start_s);
-    items.appendChild(item);
+      '<button class="esc-expand" onclick="' +
+        'var b=document.getElementById(\'' + textId + '\');' +
+        'b.classList.toggle(\'open\');' +
+        'this.textContent=b.classList.contains(\'open\')?\'+\' hide\':\'+ show\';' +
+        'event.stopPropagation();">+ show</button>' +
+      '<span class="esc-seek" onclick="seekTo(\'' + callId + '\',' + esc.audio_start_s + ');event.stopPropagation()">▶ seek</span>';
+    /* expandable detail block — shows the transcript text that triggered the flag */
+    const textBlock = document.createElement('div');
+    textBlock.className = 'esc-text-block';
+    textBlock.id = textId;
+    textBlock.textContent = esc.detail || '';
+    /* wrap row + text block in a container so they stay together */
+    const wrap = document.createElement('div');
+    wrap.style.borderBottom = '1px solid var(--line)';
+    wrap.style.padding = '2px 0';
+    wrap.appendChild(item);
+    wrap.appendChild(textBlock);
+    items.appendChild(wrap);
   });
 }
 
@@ -486,6 +512,11 @@ function render(ev) {
     p.querySelector('.override-btn').style.display = '';
     callData[ev.call_id].escalations.push(ev);
     refreshEscList(ev.call_id);
+    /* in simple mode auto-open the esc-panel so escalations are visible without clicking */
+    if (cleanMode) {
+      const escP = p.querySelector('.esc-panel');
+      escP.classList.add('open', 'escalated-open');
+    }
     document.title = '🚨 ESCALATION — AI Call Moderator';
     if (ev.call_id !== selectedCall) {
       const tab = document.querySelector('.tab[data-cid="' + ev.call_id + '"]');
