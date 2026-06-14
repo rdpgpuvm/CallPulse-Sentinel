@@ -736,12 +736,21 @@ async def clear_all():
 
 @app.get("/langfuse/{call_id}")
 async def langfuse_data(call_id: str):
-    """Return cached Langfuse generation records for a call."""
-    try:
-        import langfuse_config as _lfc
-        records = _lfc.get_call_traces(call_id)
-    except Exception:
-        records = []
+    """Return Langfuse generation records for a call.
+
+    langfuse_config._call_traces lives in the notebook kernel (a separate process),
+    so we read from langfuse_traces.jsonl which langfuse_config always writes to.
+    """
+    records = []
+    trace_file = pathlib.Path("langfuse_traces.jsonl")
+    if trace_file.exists():
+        for line in trace_file.read_text().splitlines():
+            try:
+                r = json.loads(line)
+                if r.get("call_id") == call_id:
+                    records.append(r)
+            except Exception:
+                pass
     return JSONResponse({"call_id": call_id, "records": records})
 
 

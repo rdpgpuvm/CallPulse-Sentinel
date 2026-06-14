@@ -44,13 +44,22 @@ def get_all_call_ids() -> list:
     return list(_call_traces.keys())
 
 def clear_traces():
-    """Call between pipeline runs to reset the cache."""
+    """Call between pipeline runs to reset the in-memory cache and truncate the JSONL file."""
+    global _trace_log, _local_log
     _call_traces.clear()
+    # Truncate JSONL so gui_server shows only the current run's traces
+    for fh in (_trace_log, _local_log):
+        if fh is not None:
+            try:
+                fh.seek(0); fh.truncate()
+            except Exception:
+                pass
 
 # ── Try Langfuse v3 SDK ───────────────────────────────────────────────────────
 _lf        = None
 _mode      = "local"
 _local_log = None
+_trace_log = None   # always-on JSONL for cross-process GUI access
 _session_id = f"sess-{int(time.time())}"
 
 _pub = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
@@ -73,13 +82,21 @@ if _lf is None:
     _local_log = open("langfuse_traces.jsonl", "a")
     _mode = "local"
 
+# Always open a trace log so gui_server.py (separate process) can read it
+try:
+    _trace_log = open("langfuse_traces.jsonl", "a")
+except Exception:
+    _trace_log = None
+
 
 # ── Local file helpers (Mode C) ───────────────────────────────────────────────
 def _log_local(record: dict):
-    if _local_log is None:
-        return
-    _local_log.write(json.dumps(record) + "\n")
-    _local_log.flush()
+    """Always write to langfuse_traces.jsonl so gui_server.py (a separate process)
+    can read generation records across the process boundary."""
+    fh = _trace_log if _trace_log is not None else _local_log
+    if fh is not None:
+        fh.write(json.dumps(record) + "\n")
+        fh.flush()
 
 
 def show_local_traces(n=20):
@@ -141,9 +158,9 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
                         gen.update(
                             output=result,
                             usage={
-                                "input":  usage.get("prompt_tokens", 0),
-                                "output": usage.get("completion_tokens", 0),
-                                "total":  usage.get("total_tokens", 0),
+                                "input":  usage.get("prompt", 0),
+                                "output": usage.get("completion", 0),
+                                "total":  usage.get("prompt", 0) + usage.get("completion", 0),
                             },
                             metadata={
                                 "stage":      stage,
@@ -162,15 +179,14 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
             "model":      served_model_name,
             "elapsed_ms": round(elapsed_ms),
             "usage": {
-                "input":  usage.get("prompt_tokens", 0),
-                "output": usage.get("completion_tokens", 0),
-                "total":  usage.get("total_tokens", 0),
+                "input":  usage.get("prompt", 0),
+                "output": usage.get("completion", 0),
+                "total":  usage.get("prompt", 0) + usage.get("completion", 0),
             },
             "output": result,
         }
         _call_traces.setdefault(call_id, []).append(record)
-        if _lf is None:
-            _log_local(record)
+        _log_local(record)   # always write so gui_server can read across process boundary
 
         return result
 
