@@ -115,56 +115,46 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
         call_id = _current_call_id.get()
         usage = stage_token_usage.get(stage, {})
 
+        # LLM call always runs — Langfuse tracing is non-fatal and wraps separately
+        t0_dt = datetime.now(timezone.utc)
+        result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                        json_schema, max_tokens)
+        t1_dt = datetime.now(timezone.utc)
+        elapsed_ms = (t1_dt - t0_dt).total_seconds() * 1000
+
         if _lf is not None:
-            # wrap the LLM call INSIDE the context manager so Langfuse measures
-            # the real inference latency, not just the time to call gen.update()
+            # Use the explicit trace API — session_id and user_id are trace-level
+            # fields in Langfuse; this is what populates the Sessions tab.
+            # start_time/end_time carry accurate latency measured around the real LLM call.
             try:
-                # A parent span carries session_id + user_id so all generations from
-                # this run appear grouped under one session in the Langfuse Sessions tab.
-                # Without this wrapper, session_id would only live in metadata and the
-                # Sessions view would stay empty.
-                with _lf.start_as_current_span(
+                trace = _lf.trace(
                     name=f"call-{call_id}",
-                    session_id=_session_id,   # groups every trace from this run in Sessions tab
-                    user_id=call_id,          # lets you filter by call in the Traces view
-                ):
-                    with _lf.start_as_current_observation(
-                        as_type="generation",
-                        name=f"judge-{stage}",
-                        model=served_model_name,
-                        input=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user",   "content": user_prompt},
-                        ],
-                    ) as gen:
-                        t0 = time.perf_counter()
-                        result = await generate_json_fn(stage, system_prompt, user_prompt,
-                                                        json_schema, max_tokens)
-                        elapsed_ms = (time.perf_counter() - t0) * 1000
-                        gen.update(
-                            output=result,
-                            usage={
-                                "input":  usage.get("prompt_tokens", 0),
-                                "output": usage.get("completion_tokens", 0),
-                                "total":  usage.get("total_tokens", 0),
-                            },
-                            metadata={
-                                "stage":      stage,
-                                "call_id":    call_id,
-                                "elapsed_ms": round(elapsed_ms),
-                            },
-                        )
+                    session_id=_session_id,   # groups all turns from this run in Sessions tab
+                    user_id=call_id,          # filterable per call in the Traces view
+                )
+                trace.generation(
+                    name=f"judge-{stage}",
+                    model=served_model_name,
+                    start_time=t0_dt,
+                    end_time=t1_dt,
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_prompt},
+                    ],
+                    output=result,
+                    usage={
+                        "input":  usage.get("prompt_tokens", 0),
+                        "output": usage.get("completion_tokens", 0),
+                        "total":  usage.get("total_tokens", 0),
+                    },
+                    metadata={
+                        "stage":      stage,
+                        "call_id":    call_id,
+                        "elapsed_ms": round(elapsed_ms),
+                    },
+                )
             except Exception as e:
                 print(f"[langfuse] trace error (non-fatal): {e}")
-                t0 = time.perf_counter()
-                result = await generate_json_fn(stage, system_prompt, user_prompt,
-                                                json_schema, max_tokens)
-                elapsed_ms = (time.perf_counter() - t0) * 1000
-        else:
-            t0 = time.perf_counter()
-            result = await generate_json_fn(stage, system_prompt, user_prompt,
-                                            json_schema, max_tokens)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
 
         record = {
             "ts":         datetime.now(timezone.utc).isoformat(),
