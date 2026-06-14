@@ -18,7 +18,7 @@ git clone -b vosktest https://github.com/rdpgpuvm/Project1.git /workspace/CallMo
 cd /workspace/CallModV7
 bash run_vllm_server.sh
 
-# Then run call_moderator_v5_gui.ipynb cell by cell in Tab 2
+# Then run call_moderator_gui.ipynb cell by cell in Tab 2
 ```
 
 ---
@@ -259,11 +259,11 @@ AUDIO FILE (WAV/MP3/FLAC)
   │  │  Output: {speaker, sentiment, violations, reason} │   │
   │  │          ~32-48 tokens, single pass, no retries   │   │
   │  │                                                   │   │
-  │  │  speaker: "rep"|"customer"  (content-based,       │   │
-  │  │           works on mono and stereo recordings)    │   │
+  │  │  speaker: "rep"|"customer"  (3-tier: stereo ch    │   │
+  │  │           metadata → regex → LLM fallback)        │   │
   │  │  sentiment: -2..2  (customer only)                │   │
   │  │  violations: [code, ...]  (policy codes)          │   │
-  │  │  reason: string, max 60 chars                     │   │
+  │  │  reason: string, max 35 chars                     │   │
   │  └──────────────────────────────────────────────────┘   │
   │                                                         │
   │  Deterministic escalation rules (no LLM, instant):      │
@@ -320,19 +320,21 @@ With prefix caching enabled the 300-token system prompt is computed once and reu
 |----------------------------|----------------|--------|
 | Model                      | Qwen3-4B-Instruct-2507 | 4B fits in shared VRAM with Whisper |
 | temperature                | 0              | Greedy decoding — same transcript always produces same verdict (audit reproducibility) |
-| max_tokens                 | 48             | Reason field capped at 60 chars in schema; 48 decode tokens sufficient |
+| max_tokens                 | 48             | Reason maxLength=35 chars in schema; max plausible verdict ~35 tokens; 48 is lossless ceiling |
 | guided_json                | schema         | Grammar-constrains output during decoding — eliminates JSON repair retries |
 | gpu_memory_utilization     | auto-fitted    | Script reserves ~7 GiB for Whisper, vLLM gets the rest |
 | max_model_len              | 16384          | Upper bound on context; actual prompts are ~500 tokens |
 | Semaphore                  | 16             | Client-side concurrency cap matching vLLM scheduler budget |
 
-### Speaker identification via LLM (simulation only)
+### Speaker identification — 3-tier pipeline
 
-In this notebook the judge infers speaker role (`rep` / `customer`) from conversational content as part of its single JSON output — the `speaker` field rides the same forward pass as sentiment and violations, so it costs zero additional latency or tokens.
+Speaker role (`rep` / `customer`) is resolved by a **3-tier priority chain** before each judge call:
 
-This approach is a simulation-mode workaround. Recorded audio files carry no metadata about which channel belongs to which party, so content-based inference is the only option. It works well for clear, unambiguous speech but can misclassify on mono recordings or when both parties talk simultaneously.
+1. **Stereo channel metadata** — stereo recordings split each channel separately; ch0=rep, ch1=customer is telephony ground-truth. The Brain reads this directly; no regex or LLM is consulted.
+2. **Keyword regex pre-pass** (`_guess_mono_speaker`) — for mono recordings, obvious lexical markers are matched in microseconds at zero token cost. Customer markers: *"your agent"*, *"loyal member"*, *"you work for me"*, *"the customer is always right"*, *"get me your manager"*. Rep markers: *"how can I help"*, *"let me pull up"*, *"one moment"*, *"you were speaking with"*. Returns `'rep'`, `'customer'`, or `None` (ambiguous).
+3. **LLM `speaker` field** — fallback only when regex is ambiguous. The verdict rides the same judge forward pass as sentiment and violations, so it costs zero additional latency or tokens. The system prompt includes alternation context ("previous turn was rep → expect customer") to help within the tight token budget.
 
-**In a real-time deployment this step is not needed.** Every telephony and CTI platform (Genesys, Avaya, Amazon Connect, Twilio, etc.) already knows which audio stream is the agent and which is the caller — that information is embedded in the call session metadata before the first word is spoken. You would simply pass that label directly into the pipeline instead of asking the judge to guess it. Speaker identification becomes a one-line lookup, not an inference problem.
+**In a live deployment** the telephony/CTI layer (Genesys, Avaya, Amazon Connect, Twilio, etc.) supplies channel metadata and tiers 2 and 3 never run — speaker is a one-line lookup from stream metadata.
 
 ### Langfuse observability
 
@@ -344,7 +346,9 @@ The pipeline was built to be resource-conscious without sacrificing accuracy. Ev
 
 ### CPU/GPU split
 
-Whisper (ASR) runs on CPU in int8 quantization. This frees the AMD GPU entirely for the vLLM judge — the only stage that actually requires GPU compute. Running both on GPU simultaneously causes memory contention and causes Whisper to OOM-evict vLLM's KV cache mid-call. The CPU int8 transcription runs at ~200–250 ms per 5 s chunk, comfortably within the pacing window.
+In **file mode** (`REALTIME_PACING=False`), Whisper runs on CPU (faster-whisper int8). This frees the AMD GPU entirely for vLLM and gives access to per-segment confidence metadata (`no_speech_prob`, `avg_logprob`, `compression_ratio`) needed by `quality_gated()`. CPU int8 on large-v3-turbo runs in ~1–2s per chunk — fine for offline batch processing.
+
+In **live mode** (`REALTIME_PACING=True`), Whisper switches to GPU fp16 via HF transformers (~150–400 ms per chunk). This is mandatory to keep up with the 5s live deadline and also unlocks `num_beams=4` beam search for better accuracy. GPU VRAM is shared: ~1.5 GB for Whisper fp16, remainder for vLLM.
 
 ### Silence and beep gating
 
