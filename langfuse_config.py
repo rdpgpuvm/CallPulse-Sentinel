@@ -180,6 +180,16 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
     return _wrapped
 
 
+def new_session(label: str = "") -> str:
+    """Generate a fresh session_id. Call at the start of each pipeline run so
+    every run appears as a separate Session in the Langfuse UI."""
+    global _session_id
+    _session_id = f"sess-{int(time.time())}" + (f"-{label}" if label else "")
+    if _lf is not None:
+        print(f"[langfuse] new session: {_session_id}")
+    return _session_id
+
+
 def flush():
     if _lf is not None:
         _lf.flush()
