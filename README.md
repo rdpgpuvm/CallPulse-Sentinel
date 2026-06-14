@@ -314,9 +314,13 @@ With prefix caching enabled the 300-token system prompt is computed once and reu
 | max_model_len              | 16384          | Upper bound on context; actual prompts are ~500 tokens |
 | Semaphore                  | 16             | Client-side concurrency cap matching vLLM scheduler budget |
 
-### Speaker identification via LLM
+### Speaker identification via LLM (simulation only)
 
-Rather than a channel-index heuristic (which breaks on mono recordings), the judge identifies the speaker from content as part of its single JSON output. The `speaker` field costs no additional latency — it rides the same forward pass that produces sentiment and violations. The judge has the 3-turn labeled context to anchor its decision.
+In this notebook the judge infers speaker role (`rep` / `customer`) from conversational content as part of its single JSON output — the `speaker` field rides the same forward pass as sentiment and violations, so it costs zero additional latency or tokens.
+
+This approach is a simulation-mode workaround. Recorded audio files carry no metadata about which channel belongs to which party, so content-based inference is the only option. It works well for clear, unambiguous speech but can misclassify on mono recordings or when both parties talk simultaneously.
+
+**In a real-time deployment this step is not needed.** Every telephony and CTI platform (Genesys, Avaya, Amazon Connect, Twilio, etc.) already knows which audio stream is the agent and which is the caller — that information is embedded in the call session metadata before the first word is spoken. You would simply pass that label directly into the pipeline instead of asking the judge to guess it. Speaker identification becomes a one-line lookup, not an inference problem.
 
 ### Langfuse observability
 
