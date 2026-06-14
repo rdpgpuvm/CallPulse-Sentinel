@@ -13,6 +13,12 @@ New in v7:
     recording can be validated by ear — confirming whether the skip was correct.
   - audio_start_s on every turn + alert event so both panels know where in the
     recording to seek to.
+  - X button on each call tab to dismiss it from the UI and remove it from the event
+    log so it does not reappear on refresh or reconnect.
+  - WebSocket ?since=N param: on reconnect only replay missing events, no duplicate
+    turns.  Auto-reconnect loop keeps the live feed going after a brief blip.
+  - EVENT_FILE stored in the working directory (not /tmp) so the log survives server
+    restarts and kernel relaunches.
 
 Unchanged from v5/v6:
   - WebSocket first, automatic 1s HTTP polling fallback
@@ -28,7 +34,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 app = FastAPI()
-EVENT_FILE = pathlib.Path("/tmp/call_moderator_events.jsonl")
+
+# Stored in CWD (next to the notebook) so the log survives /tmp clears and
+# kernel / server restarts.  On startup the file is replayed into EVENT_LOG so
+# a browser refresh or reopen always gets the full session history.
+EVENT_FILE = pathlib.Path("call_moderator_events.jsonl")
 EVENT_LOG  = []
 if EVENT_FILE.exists():
     for line in EVENT_FILE.read_text().splitlines():
@@ -72,9 +82,6 @@ PAGE = r"""<!DOCTYPE html>
   .hbtn:hover { border-color:var(--dim); }
   .hbtn.on { border-color:var(--repglow); color:var(--repglow); }
 
-  /* 3-person supervising indicator — centered in the global header between the status
-     text and the clean-mode button.  Hidden until a supervisor activates override on
-     any call; latched on (never hides again) for the duration of the session. */
   #supervising { display:none; align-items:center; gap:8px;
                  background:rgba(35,134,54,.18); border:1px solid #238636;
                  border-radius:20px; padding:5px 18px;
@@ -85,10 +92,15 @@ PAGE = r"""<!DOCTYPE html>
 
   #tabs { display:flex; gap:8px; padding:12px 18px 0; flex-wrap:wrap; }
   .tab { background:var(--panel); border:1px solid var(--line); color:var(--dim); cursor:pointer;
-         border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600; }
+         border-radius:8px; padding:6px 12px; font-size:12px; font-weight:600;
+         display:flex; align-items:center; gap:6px; }
   .tab:hover { border-color:var(--dim); }
   .tab.selected { border-color:var(--repglow); color:var(--repglow); }
   .tab.alerted  { border-color:var(--bad); color:#ffa198; animation:flash 1s linear 6; }
+  .tab-x { font-size:11px; line-height:1; opacity:.45; border:none; background:none;
+            color:inherit; cursor:pointer; padding:0 2px; border-radius:3px; }
+  .tab-x:hover { opacity:1; color:var(--bad); }
+
   #calls { padding:18px; display:grid; gap:18px; }
   .call { display:none; }
   .call.selected { display:block; }
@@ -100,15 +112,12 @@ PAGE = r"""<!DOCTYPE html>
   .call h2 audio { height:30px; margin-left:auto; flex:1; max-width:480px;
                    filter:invert(.88) hue-rotate(180deg); border-radius:6px; }
 
-  /* override button — amber signals "action available" not "already broken".
-     Turns green and locks when the supervisor has joined. */
   .override-btn { background:var(--warn); color:#000; border:none; border-radius:8px;
                   padding:5px 14px; font-size:12.5px; cursor:pointer; font-weight:700;
                   white-space:nowrap; transition:background .2s; }
   .override-btn:hover { filter:brightness(1.12); }
   .override-btn.supervising { background:#238636; color:#fff; cursor:default; }
 
-  /* escalation list — inline below h2 so the supervisor sees it without scrolling */
   .esc-panel { display:none; background:rgba(218,54,51,.07);
                border-bottom:1px solid rgba(218,54,51,.3); padding:10px 16px; }
   .esc-panel.open { display:block; }
@@ -132,7 +141,6 @@ PAGE = r"""<!DOCTYPE html>
                     font-size:12px; color:var(--text); line-height:1.5;
                     border-left:2px solid var(--bad); margin:4px 0 2px 4px; }
   .esc-text-block.open { display:block; }
-  /* in simple mode auto-open the esc-panel so escalations are always visible */
   body.clean .esc-panel.escalated-open { display:block; }
   .esc-join-btn { display:block; margin:10px 12px 6px;
     background:#238636; color:#fff; border:none; border-radius:8px;
@@ -189,8 +197,6 @@ PAGE = r"""<!DOCTYPE html>
   .chip.sent   { background:rgba(110,118,129,.3); color:var(--dim); }
   .chip.time   { background:rgba(110,118,129,.18); color:var(--dim); font-weight:500; }
 
-
-  /* ── langfuse info panel ─────────────────────────────────────── */
   .lf-btn { margin-left:10px; padding:3px 10px; font-size:11px; font-weight:600;
     background:none; border:1px solid var(--line); border-radius:4px;
     color:var(--dim); cursor:pointer; vertical-align:middle; }
@@ -213,10 +219,7 @@ PAGE = r"""<!DOCTYPE html>
   .lf-verdict { font-family:monospace; font-size:10px; color:var(--dim);
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
   .lf-no-data { color:var(--dim); font-size:12px; padding:8px 0; }
-  /* skipped-segment panel — collapsible at the bottom of each call.
-     Color-coded by reason so the supervisor can triage at a glance:
-     grey=silence (almost certainly fine), amber=censor beep (redacted PII, fine),
-     red=low-confidence or repetition (may have been real flaggable speech). */
+
   .skip-panel { border-top:1px solid var(--line); }
   .skip-header { padding:9px 16px; font-size:12px; color:var(--dim); cursor:pointer;
                  display:flex; align-items:center; gap:8px; user-select:none;
@@ -261,8 +264,6 @@ PAGE = r"""<!DOCTYPE html>
 <script>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
 
-/* calls[id] = the panel DOM element (unchanged from v5 so existing querySelector calls work)
-   callData[id] = extra per-call state added in v7                                          */
 const calls    = {};
 const callData = {};
 let selectedCall = null, cursor = 0, polling = false;
@@ -296,8 +297,34 @@ function selectCall(callId) {
   });
 }
 
-/* ---------- transport: WebSocket → 1s HTTP polling fallback ---------- */
+/* ---------- dismiss call (X button) ----------
+   POSTs to the server which removes all events for this call from EVENT_LOG
+   and rewrites the event file — the call will not reappear on refresh or
+   reconnect.  DOM is cleaned up immediately on the client side.              */
+async function dismissCall(callId, event) {
+  event.stopPropagation();
+  if (!confirm('Remove call "' + callId + '" from the dashboard?\nThis clears it from the session log and it will not reappear on refresh.')) return;
+  try { await fetch(base + 'dismiss/' + callId, { method: 'POST' }); } catch(e) {}
+  const tab = document.querySelector('.tab[data-cid="' + callId + '"]');
+  if (tab) tab.remove();
+  const p = calls[callId];
+  if (p) p.remove();
+  delete calls[callId];
+  delete callData[callId];
+  if (selectedCall === callId) {
+    selectedCall = null;
+    const firstTab = document.querySelector('.tab');
+    if (firstTab) selectCall(firstTab.dataset.cid);
+  }
+}
+
+/* ---------- transport: WebSocket with auto-reconnect → 1s HTTP polling fallback
+   ?since=N tells the server to replay only events the client hasn't seen yet.
+   On a fresh page load cursor=0 so the full session history is replayed and the
+   chat is restored.  On reconnect cursor=N so only missed events are delivered —
+   no duplicate turns appended to the conversation.                              */
 function goLive(m) { dot.classList.add('live'); status.textContent = 'live (' + m + ')'; }
+
 function startPolling() {
   if (polling) return; polling = true; goLive('polling');
   setInterval(async () => {
@@ -308,24 +335,27 @@ function startPolling() {
     } catch (e) {}
   }, 1000);
 }
-try {
-  const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  const ws = new WebSocket(wsProto + location.host + base + 'ws');
-  ws.onopen    = () => goLive('websocket');
-  ws.onmessage = (e) => { render(JSON.parse(e.data)); cursor++; };
-  ws.onerror   = startPolling;
-  ws.onclose   = () => { if (!polling) startPolling(); };
-  setTimeout(() => { if (ws.readyState !== 1) startPolling(); }, 3000);
-} catch (e) { startPolling(); }
+
+function connectWS() {
+  try {
+    const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const ws = new WebSocket(wsProto + location.host + base + 'ws?since=' + cursor);
+    let opened = false;
+    ws.onopen    = () => { opened = true; goLive('websocket'); };
+    ws.onmessage = (e) => { render(JSON.parse(e.data)); cursor++; };
+    ws.onerror   = () => { if (!opened) startPolling(); };
+    ws.onclose   = () => { setTimeout(connectWS, 2000); };
+    /* if WS hasn't opened within 3s start polling as a fallback */
+    setTimeout(() => { if (ws.readyState !== 1) startPolling(); }, 3000);
+  } catch (e) { startPolling(); setTimeout(connectWS, 3000); }
+}
+connectWS();
 
 function nearBottom() {
   return window.innerHeight + window.scrollY >= document.body.scrollHeight - 180;
 }
 
-/* ---------- audio seek ----------
-   audio[preload=metadata] loads just the index (duration, byte-range map).
-   Setting currentTime triggers a byte-range fetch to the new position — cheap
-   and instant on a local server regardless of file size.                      */
+/* ---------- audio seek ---------- */
 function fmtTime(s) {
   if (s == null || !isFinite(s)) return '--:--';
   return Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
@@ -334,36 +364,26 @@ function seekTo(callId, seconds) {
   const cd = callData[callId];
   if (!cd || !cd.audioEl || !isFinite(+seconds)) return;
   cd.audioEl.currentTime = +seconds;
-  /* intentionally NOT auto-playing — supervisor reviews context first */
 }
 
-/* ---------- override handler ----------
-   First click: open the escalation panel so manager can seek & review each
-   flagged segment before deciding to join.  Does NOT mark as supervising yet —
-   that requires a deliberate "JOIN CALL" click inside the panel.
-   Subsequent clicks: toggle the panel open/closed.                            */
+/* ---------- override / join ---------- */
 function handleOverride(callId) {
   const p     = calls[callId];
   const btn   = p.querySelector('.override-btn');
   const panel = p.querySelector('.esc-panel');
   const isOpen = panel.classList.toggle('open');
-  /* Button label reflects review state (not supervising yet) */
-  if (!callData[callId].overridden) {
+  if (!callData[callId].overridden)
     btn.textContent = isOpen ? '🔍 REVIEWING...' : '⚡ OVERRIDE';
-  }
 }
 
-/* ---------- join call (called from JOIN CALL button inside esc-panel) ----------
-   Separate from handleOverride so manager must consciously confirm after review. */
 function joinCall(callId) {
-  const cd  = callData[callId];
-  if (cd.overridden) return;          /* idempotent */
+  const cd = callData[callId];
+  if (cd.overridden) return;
   cd.overridden = true;
   const p   = calls[callId];
   const btn = p.querySelector('.override-btn');
   btn.classList.add('supervising');
   btn.textContent = '✅ SUPERVISING';
-  /* disable the JOIN button so it can't be double-clicked */
   const joinBtn = p.querySelector('.esc-join-btn');
   if (joinBtn) { joinBtn.disabled = true; joinBtn.textContent = '✅ Joined'; }
   document.getElementById('supervising').classList.add('active');
@@ -374,7 +394,6 @@ function refreshEscList(callId) {
   const items = calls[callId].querySelector('.esc-items');
   items.innerHTML = '';
   callData[callId].escalations.forEach((esc, idx) => {
-    /* row: timestamp | turn | rule | expand btn | seek btn */
     const item = document.createElement('div');
     item.className = 'esc-item';
     const textId = 'esc-txt-' + callId + '-' + idx;
@@ -388,12 +407,10 @@ function refreshEscList(callId) {
         'this.textContent=b.classList.contains(\'open\')?\'+\' hide\':\'+ show\';' +
         'event.stopPropagation();">+ show</button>' +
       '<span class="esc-seek" onclick="seekTo(\'' + callId + '\',' + esc.audio_start_s + ');event.stopPropagation()">▶ seek</span>';
-    /* expandable detail block — shows the transcript text that triggered the flag */
     const textBlock = document.createElement('div');
     textBlock.className = 'esc-text-block';
     textBlock.id = textId;
     textBlock.textContent = esc.detail || '';
-    /* wrap row + text block in a container so they stay together */
     const wrap = document.createElement('div');
     wrap.style.borderBottom = '1px solid var(--line)';
     wrap.style.padding = '2px 0';
@@ -412,7 +429,6 @@ function refreshSkipPanel(callId) {
   const n     = cd.skips.length;
   badge.textContent = n + ' skipped segment' + (n !== 1 ? 's' : '');
   badge.classList.toggle('has-items', n > 0);
-  /* only re-render if panel is open (avoids DOM churn on every skip event) */
   if (!body.classList.contains('open')) return;
   body.innerHTML = '';
   cd.skips.forEach(sk => {
@@ -422,10 +438,9 @@ function refreshSkipPanel(callId) {
     const rc = (sk.reason || 'silence').replace(/[^a-z_]/g, '');
     const SKIP_LABELS = {silence:'silence',beep:'🔇 PII/Sensitive',
       no_speech:'no speech',low_confidence:'low confidence',repetition:'repetition'};
-    const skipLabel = SKIP_LABELS[rc] || rc;
     item.innerHTML =
       '<span class="skip-ts">' + fmtTime(sk.audio_start_s) + '</span>' +
-      '<span class="skip-tag ' + rc + '">' + skipLabel + '</span>' +
+      '<span class="skip-tag ' + rc + '">' + (SKIP_LABELS[rc] || rc) + '</span>' +
       '<span class="skip-detail">' + (sk.detail || '') + '</span>' +
       '<span class="skip-seek">▶ seek</span>';
     item.onclick = () => seekTo(callId, sk.audio_start_s);
@@ -435,7 +450,6 @@ function refreshSkipPanel(callId) {
 
 const fadeTimers = {};
 
-/* ---------- panel factory ---------- */
 /* ---------- langfuse info panel ---------- */
 async function toggleLangfuse(callId) {
   const callDiv = calls[callId];
@@ -443,12 +457,9 @@ async function toggleLangfuse(callId) {
   const panel = callDiv.querySelector('.lf-panel');
   const btn   = callDiv.querySelector('.lf-btn');
   if (panel.classList.contains('open')) {
-    panel.classList.remove('open');
-    btn.textContent = 'info';
-    return;
+    panel.classList.remove('open'); btn.textContent = 'info'; return;
   }
-  btn.classList.add('loading');
-  btn.textContent = 'loading...';
+  btn.classList.add('loading'); btn.textContent = 'loading...';
   try {
     const r   = await fetch(base + 'langfuse/' + callId);
     const dat = await r.json();
@@ -456,8 +467,7 @@ async function toggleLangfuse(callId) {
   } catch(e) {
     panel.innerHTML = '<div class="lf-no-data">Could not load Langfuse data: ' + e + '</div>';
   }
-  btn.classList.remove('loading');
-  btn.textContent = 'info';
+  btn.classList.remove('loading'); btn.textContent = 'info';
   panel.classList.add('open');
 }
 
@@ -470,8 +480,6 @@ function renderLangfuse(panel, records) {
   const totalOut = records.reduce((s,r) => s + (r.usage?.output || 0), 0);
   const totalMs  = records.reduce((s,r) => s + (r.elapsed_ms || 0), 0);
   const avgMs    = records.length ? Math.round(totalMs / records.length) : 0;
-
-  // stage breakdown
   const stages = {};
   records.forEach(r => {
     const s = stages[r.stage] || {count:0, ms:0, input:0, output:0};
@@ -479,53 +487,40 @@ function renderLangfuse(panel, records) {
     s.input += r.usage?.input||0; s.output += r.usage?.output||0;
     stages[r.stage] = s;
   });
-
   let stageRows = '';
   Object.entries(stages).forEach(([stage, s]) => {
     stageRows += '<tr><td>' + stage + '</td><td>' + s.count + '</td>' +
       '<td>' + Math.round(s.ms/s.count) + ' ms avg</td>' +
       '<td>' + s.input + '</td><td>' + s.output + '</td></tr>';
   });
-
   let genRows = '';
   records.forEach((r, i) => {
     const verdict = r.output ? JSON.stringify(r.output).slice(0,80) : '-';
-    genRows += '<tr>' +
-      '<td>' + (i+1) + '</td>' +
-      '<td>' + r.stage + '</td>' +
+    genRows += '<tr><td>' + (i+1) + '</td><td>' + r.stage + '</td>' +
       '<td>' + (r.elapsed_ms||0) + ' ms</td>' +
-      '<td>' + (r.usage?.input||0) + '</td>' +
-      '<td>' + (r.usage?.output||0) + '</td>' +
-      '<td class="lf-verdict" title="' + verdict.replace(/"/g,'&quot;') + '">' + verdict + '</td>' +
-    '</tr>';
+      '<td>' + (r.usage?.input||0) + '</td><td>' + (r.usage?.output||0) + '</td>' +
+      '<td class="lf-verdict" title="' + verdict.replace(/"/g,'&quot;') + '">' + verdict + '</td></tr>';
   });
-
   panel.innerHTML =
-    '<div class="lf-section">' +
-      '<div class="lf-section-title">Token Usage</div>' +
+    '<div class="lf-section"><div class="lf-section-title">Token Usage</div>' +
       '<div class="lf-kv">' +
         '<span class="k">Input tokens</span><span>' + totalIn + '</span>' +
         '<span class="k">Output tokens</span><span>' + totalOut + '</span>' +
         '<span class="k">Total tokens</span><span>' + (totalIn+totalOut) + '</span>' +
         '<span class="k">LLM calls</span><span>' + records.length + '</span>' +
         '<span class="k">Avg judge latency</span><span>' + avgMs + ' ms</span>' +
-      '</div>' +
-    '</div>' +
-    '<div class="lf-section">' +
-      '<div class="lf-section-title">By Stage</div>' +
+      '</div></div>' +
+    '<div class="lf-section"><div class="lf-section-title">By Stage</div>' +
       '<table class="lf-table"><thead><tr>' +
         '<th>Stage</th><th>Calls</th><th>Latency</th><th>In tokens</th><th>Out tokens</th>' +
-      '</tr></thead><tbody>' + stageRows + '</tbody></table>' +
-    '</div>' +
-    '<div class="lf-section">' +
-      '<div class="lf-section-title">Generations</div>' +
+      '</tr></thead><tbody>' + stageRows + '</tbody></table></div>' +
+    '<div class="lf-section"><div class="lf-section-title">Generations</div>' +
       '<table class="lf-table"><thead><tr>' +
         '<th>#</th><th>Stage</th><th>Latency</th><th>In</th><th>Out</th><th>Verdict</th>' +
-      '</tr></thead><tbody>' + genRows + '</tbody></table>' +
-    '</div>';
+      '</tr></thead><tbody>' + genRows + '</tbody></table></div>';
 }
 
-
+/* ---------- panel factory ---------- */
 function panel(callId) {
   if (!calls[callId]) {
     const div = document.createElement('div');
@@ -568,10 +563,15 @@ function panel(callId) {
 
     document.getElementById('calls').appendChild(div);
 
+    /* Tab with X dismiss button */
     const tab = document.createElement('button');
     tab.className = 'tab'; tab.dataset.cid = callId;
-    tab.textContent = callId.length > 16 ? callId.slice(-16) : callId;
-    tab.onclick = () => selectCall(callId);
+    const label = callId.length > 16 ? callId.slice(-16) : callId;
+    tab.innerHTML =
+      '<span>' + label + '</span>' +
+      '<span class="tab-x" title="Remove this call from dashboard"' +
+        ' onclick="dismissCall(\'' + callId + '\', event)">&#10005;</span>';
+    tab.onclick = (e) => { if (!e.target.classList.contains('tab-x')) selectCall(callId); };
     document.getElementById('tabs').appendChild(tab);
 
     calls[callId]    = div;
@@ -590,7 +590,7 @@ function render(ev) {
     p.querySelector('.person.' + ev.role).classList.add('speaking');
     const sp = p.querySelector('.speech');
     sp.className = 'speech ' + ev.role + (ev.violations.length ? ' violation' : '');
-    sp.innerHTML = '“' + ev.text + '”' +
+    sp.innerHTML = '"' + ev.text + '"' +
       (ev.violations.length
         ? '<div class="vio">⚠ ' + ev.violations.join(', ') + ' — ' + (ev.reason||'') + '</div>'
         : '');
@@ -615,10 +615,8 @@ function render(ev) {
     p.querySelector('.turns').appendChild(t);
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     status.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
-    /* sync audio seeker: when checked, each incoming turn moves the player to its timestamp */
-    if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined) {
+    if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined)
       seekTo(ev.call_id, ev.audio_start_s);
-    }
 
   } else if (ev.type === 'alert') {
     const p = panel(ev.call_id);
@@ -631,7 +629,6 @@ function render(ev) {
     p.querySelector('.override-btn').style.display = '';
     callData[ev.call_id].escalations.push(ev);
     refreshEscList(ev.call_id);
-    /* in simple mode auto-open the esc-panel so escalations are visible without clicking */
     if (cleanMode) {
       const escP = p.querySelector('.esc-panel');
       escP.classList.add('open', 'escalated-open');
@@ -648,8 +645,9 @@ function render(ev) {
     const p = panel(ev.call_id);
     const st = p.querySelector('.call-status');
     if (st) st.textContent = 'done';
+
   } else if (ev.type === 'skip') {
-    panel(ev.call_id);   /* ensure panel exists */
+    panel(ev.call_id);
     callData[ev.call_id].skips.push(ev);
     refreshSkipPanel(ev.call_id);
 
@@ -674,6 +672,19 @@ async def receive_event(event: dict):
     for ws in dead:
         CONNECTED.discard(ws)
     return {"ok": True, "clients": len(CONNECTED)}
+
+
+@app.post("/dismiss/{call_id}")
+async def dismiss_call(call_id: str):
+    """Remove all events for a call from the in-memory log and rewrite the event
+    file so the call does not reappear on refresh or server restart."""
+    global EVENT_LOG
+    EVENT_LOG = [e for e in EVENT_LOG if e.get("call_id") != call_id]
+    if EVENT_LOG:
+        EVENT_FILE.write_text("\n".join(json.dumps(e) for e in EVENT_LOG) + "\n")
+    else:
+        EVENT_FILE.write_text("")
+    return {"ok": True, "call_id": call_id, "remaining_events": len(EVENT_LOG)}
 
 
 @app.get("/langfuse/{call_id}")
@@ -709,8 +720,15 @@ async def index_any(full_path: str, since: int = 0):
 @app.websocket("/ws")
 @app.websocket("/{prefix:path}/ws")
 async def websocket_endpoint(ws: WebSocket):
+    """Accept a WebSocket connection.
+
+    ?since=N replays only events from index N onward — lets reconnecting clients
+    catch up without receiving duplicates.  Fresh page loads pass since=0 (default)
+    and get the full session history replayed instantly.
+    """
+    since = int(ws.query_params.get("since", 0))
     await ws.accept()
-    for event in EVENT_LOG:
+    for event in EVENT_LOG[since:]:
         await ws.send_text(json.dumps(event))
     CONNECTED.add(ws)
     try:
