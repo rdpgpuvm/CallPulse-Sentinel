@@ -680,8 +680,6 @@ function render(ev) {
     cursor = 0;
     document.title = 'AI Call Moderator — LIVE';
     statusEl.textContent = 'dashboard cleared — waiting for new run…';
-
-  }
   }
 }
 </script></body></html>"""
