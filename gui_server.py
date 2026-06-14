@@ -15,7 +15,7 @@ New in v7:
     recording to seek to.
   - X button on each call tab to dismiss it from the UI and remove it from the event
     log so it does not reappear on refresh or reconnect.
-  - WebSocket ?since=N param: on reconnect only replay missing events, no duplicate
+  - WebSocket: proxy-safe (no query string on WS URL); HTTP catch-up on onopen for session persistence
     turns.  Auto-reconnect loop keeps the live feed going after a brief blip.
   - EVENT_FILE stored in the working directory (not /tmp) so the log survives server
     restarts and kernel relaunches.
@@ -320,10 +320,12 @@ async function dismissCall(callId, event) {
 }
 
 /* ---------- transport: WebSocket with auto-reconnect → 1s HTTP polling fallback
-   ?since=N tells the server to replay only events the client hasn't seen yet.
-   On a fresh page load cursor=0 so the full session history is replayed and the
-   chat is restored.  On reconnect cursor=N so only missed events are delivered —
-   no duplicate turns appended to the conversation.                              */
+   WS URL carries NO query string so Jupyter proxy forwards the upgrade cleanly.
+   On ws.onopen the client fetches GET /events?since=cursor via HTTP (always works
+   through proxy) to catch up on history without duplicates.  New live events are
+   then pushed via WS broadcast.  On reconnect the same onopen HTTP fetch resumes
+   from where the client left off — session persistence and no-duplicate reconnect
+   both work regardless of whether the browser uses a proxy or hits the port directly. */
 function goLive(m) { dot.classList.add('live'); statusEl.textContent = 'live (' + m + ')'; }
 
 function startPolling() {
@@ -340,9 +342,20 @@ function startPolling() {
 function connectWS() {
   try {
     const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    const ws = new WebSocket(wsProto + location.host + base + 'ws?since=' + cursor);
+    /* No ?since= on WS URL — Jupyter proxy drops query strings on WS upgrades.
+       History is caught up via HTTP on onopen instead (see below).            */
+    const ws = new WebSocket(wsProto + location.host + base + 'ws');
     let opened = false;
-    ws.onopen    = () => { opened = true; goLive('websocket'); };
+    ws.onopen = () => {
+      opened = true;
+      /* Fetch missed events via HTTP — ?since=cursor gives only unseen events,
+         preserving session history without duplicates on reconnect.            */
+      fetch(base + 'events?since=' + cursor)
+        .then(r => r.json())
+        .then(d => { d.events.forEach(render); cursor = Math.max(cursor, d.next); })
+        .catch(() => {})
+        .finally(() => goLive('websocket'));
+    };
     ws.onmessage = (e) => { render(JSON.parse(e.data)); cursor++; };
     ws.onerror   = () => { if (!opened) startPolling(); };
     ws.onclose   = () => { setTimeout(connectWS, 2000); };
@@ -758,15 +771,13 @@ async def index_any(full_path: str, since: int = 0):
 async def websocket_endpoint(ws: WebSocket):
     """Accept a WebSocket connection.
 
-    ?since=N replays only events from index N onward — lets reconnecting clients
-    catch up without receiving duplicates.  Fresh page loads pass since=0 (default)
-    and get the full session history replayed instantly.
+    History replay is handled by the client via GET /events?since=N (HTTP, always
+    works through Jupyter proxy).  The server only pushes NEW events via broadcast.
+    Adding to CONNECTED before any I/O means zero events are missed between accept
+    and the client's HTTP catch-up fetch.
     """
-    since = int(ws.query_params.get("since", 0))
     await ws.accept()
-    for event in EVENT_LOG[since:]:
-        await ws.send_text(json.dumps(event))
-    CONNECTED.add(ws)
+    CONNECTED.add(ws)          # join broadcast set immediately — no WS replay
     try:
         while True:
             await ws.receive_text()
