@@ -90,4 +90,6 @@ exec env VLLM_USE_TRITON_FLASH_ATTN=0 vllm serve "${MODEL_ID}" \
     --api-key "${API_KEY}" \
     --port "${PORT}" \
     --max-model-len "${MAX_MODEL_LEN}" \
-    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+    --enable-prefix-caching \
+    --max-num-seqs 32
