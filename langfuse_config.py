@@ -123,36 +123,34 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
         elapsed_ms = (t1_dt - t0_dt).total_seconds() * 1000
 
         if _lf is not None:
-            # Use the explicit trace API — session_id and user_id are trace-level
-            # fields in Langfuse; this is what populates the Sessions tab.
-            # start_time/end_time carry accurate latency measured around the real LLM call.
+            # propagate_attributes is the v3 SDK way to attach session_id to all
+            # observations created inside the context — this populates the Sessions tab.
+            # ref: langfuse.com/docs/observability/features/sessions
             try:
-                trace = _lf.trace(
-                    name=f"call-{call_id}",
-                    session_id=_session_id,   # groups all turns from this run in Sessions tab
-                    user_id=call_id,          # filterable per call in the Traces view
-                )
-                trace.generation(
-                    name=f"judge-{stage}",
-                    model=served_model_name,
-                    start_time=t0_dt,
-                    end_time=t1_dt,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                    output=result,
-                    usage={
-                        "input":  usage.get("prompt_tokens", 0),
-                        "output": usage.get("completion_tokens", 0),
-                        "total":  usage.get("total_tokens", 0),
-                    },
-                    metadata={
-                        "stage":      stage,
-                        "call_id":    call_id,
-                        "elapsed_ms": round(elapsed_ms),
-                    },
-                )
+                from langfuse import propagate_attributes
+                with propagate_attributes(session_id=_session_id, user_id=call_id):
+                    with _lf.start_as_current_observation(
+                        as_type="generation",
+                        name=f"judge-{stage}",
+                        model=served_model_name,
+                        input=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user",   "content": user_prompt},
+                        ],
+                    ) as gen:
+                        gen.update(
+                            output=result,
+                            usage={
+                                "input":  usage.get("prompt_tokens", 0),
+                                "output": usage.get("completion_tokens", 0),
+                                "total":  usage.get("total_tokens", 0),
+                            },
+                            metadata={
+                                "stage":      stage,
+                                "call_id":    call_id,
+                                "elapsed_ms": round(elapsed_ms),
+                            },
+                        )
             except Exception as e:
                 print(f"[langfuse] trace error (non-fatal): {e}")
 
