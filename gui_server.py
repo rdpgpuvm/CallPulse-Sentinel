@@ -263,6 +263,7 @@ PAGE = r"""<!DOCTYPE html>
 <div id="calls"></div>
 <script>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
+const statusEl = document.getElementById('status');
 
 const calls    = {};
 const callData = {};
@@ -323,7 +324,7 @@ async function dismissCall(callId, event) {
    On a fresh page load cursor=0 so the full session history is replayed and the
    chat is restored.  On reconnect cursor=N so only missed events are delivered —
    no duplicate turns appended to the conversation.                              */
-function goLive(m) { dot.classList.add('live'); status.textContent = 'live (' + m + ')'; }
+function goLive(m) { dot.classList.add('live'); statusEl.textContent = 'live (' + m + ')'; }
 
 function startPolling() {
   if (polling) return; polling = true; goLive('polling');
@@ -614,7 +615,7 @@ function render(ev) {
                   ev.text + '<div class="chips">' + chips + '</div>';
     p.querySelector('.turns').appendChild(t);
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
-    status.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
+    statusEl.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
     if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined)
       seekTo(ev.call_id, ev.audio_start_s);
 
@@ -652,7 +653,7 @@ function render(ev) {
     refreshSkipPanel(ev.call_id);
 
   } else if (ev.type === 'status') {
-    status.textContent = ev.text;
+    statusEl.textContent = ev.text;
   } else if (ev.type === 'clear') {
     /* server-initiated full reset — wipe all calls and tabs, reset state */
     Object.keys(calls).forEach(cid => {
@@ -665,7 +666,7 @@ function render(ev) {
     selectedCall = null;
     cursor = 0;
     document.title = 'AI Call Moderator — LIVE';
-    status.textContent = 'dashboard cleared — waiting for new run…';
+    statusEl.textContent = 'dashboard cleared — waiting for new run…';
 
   }
   }
