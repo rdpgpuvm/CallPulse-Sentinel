@@ -653,6 +653,21 @@ function render(ev) {
 
   } else if (ev.type === 'status') {
     status.textContent = ev.text;
+  } else if (ev.type === 'clear') {
+    /* server-initiated full reset — wipe all calls and tabs, reset state */
+    Object.keys(calls).forEach(cid => {
+      if (calls[cid]) calls[cid].remove();
+      delete calls[cid];
+      delete callData[cid];
+    });
+    document.getElementById('tabs').innerHTML = '';
+    document.getElementById('calls').innerHTML = '';
+    selectedCall = null;
+    cursor = 0;
+    document.title = 'AI Call Moderator — LIVE';
+    status.textContent = 'dashboard cleared — waiting for new run…';
+
+  }
   }
 }
 </script></body></html>"""
@@ -686,6 +701,26 @@ async def dismiss_call(call_id: str):
         EVENT_FILE.write_text("")
     return {"ok": True, "call_id": call_id, "remaining_events": len(EVENT_LOG)}
 
+
+
+@app.post("/clear")
+async def clear_all():
+    """Wipe the full event log and notify all connected clients to reset their UI.
+    Called at the start of Cell 8 so a new pipeline run always starts with a
+    blank dashboard, even if old recordings were loaded from the event file."""
+    global EVENT_LOG
+    EVENT_LOG = []
+    EVENT_FILE.write_text("")
+    reset_event = json.dumps({"type": "clear"})
+    dead = []
+    for ws in CONNECTED:
+        try:
+            await ws.send_text(reset_event)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        CONNECTED.discard(ws)
+    return {"ok": True, "message": "event log cleared"}
 
 @app.get("/langfuse/{call_id}")
 async def langfuse_data(call_id: str):
