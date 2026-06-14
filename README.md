@@ -135,6 +135,18 @@ The pipeline is **unchanged** whether you run Cell 7 or not.
 - Keys found in `.env` → Mode A or B (dashboard)
 - No keys → Mode C (local file)
 
+### Sessions (Modes A and B)
+
+Every pipeline run is automatically assigned a unique `session_id` (e.g. `sess-1781397200`), generated at import time in `langfuse_config.py`. All LLM judge calls in that run are attached to this session as a **first-class Langfuse field** — not just metadata — via a parent span that carries `session_id` and `user_id=call_id`.
+
+**To view a session in the cloud UI:**
+1. Open `https://us.cloud.langfuse.com` (or your self-hosted URL)
+2. Click **Sessions** in the left sidebar
+3. Select the session ID printed at startup (e.g. `sess-1781397200`)
+
+The Sessions view shows aggregate token usage, total cost, and a latency timeline across every call processed in that run. Individual calls are also filterable in the Traces view by `user_id=call_id`.
+
+
 ---
 
 ## Recordings included

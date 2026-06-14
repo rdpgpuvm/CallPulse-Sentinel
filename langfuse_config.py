@@ -119,33 +119,41 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
             # wrap the LLM call INSIDE the context manager so Langfuse measures
             # the real inference latency, not just the time to call gen.update()
             try:
-                with _lf.start_as_current_observation(
-                    as_type="generation",
-                    name=f"judge-{stage}",
-                    model=served_model_name,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_prompt},
-                    ],
-                ) as gen:
-                    t0 = time.perf_counter()
-                    result = await generate_json_fn(stage, system_prompt, user_prompt,
-                                                    json_schema, max_tokens)
-                    elapsed_ms = (time.perf_counter() - t0) * 1000
-                    gen.update(
-                        output=result,
-                        usage={
-                            "input":  usage.get("prompt_tokens", 0),
-                            "output": usage.get("completion_tokens", 0),
-                            "total":  usage.get("total_tokens", 0),
-                        },
-                        metadata={
-                            "stage":      stage,
-                            "call_id":    call_id,
-                            "session_id": _session_id,
-                            "elapsed_ms": round(elapsed_ms),
-                        },
-                    )
+                # A parent span carries session_id + user_id so all generations from
+                # this run appear grouped under one session in the Langfuse Sessions tab.
+                # Without this wrapper, session_id would only live in metadata and the
+                # Sessions view would stay empty.
+                with _lf.start_as_current_span(
+                    name=f"call-{call_id}",
+                    session_id=_session_id,   # groups every trace from this run in Sessions tab
+                    user_id=call_id,          # lets you filter by call in the Traces view
+                ):
+                    with _lf.start_as_current_observation(
+                        as_type="generation",
+                        name=f"judge-{stage}",
+                        model=served_model_name,
+                        input=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user",   "content": user_prompt},
+                        ],
+                    ) as gen:
+                        t0 = time.perf_counter()
+                        result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                                        json_schema, max_tokens)
+                        elapsed_ms = (time.perf_counter() - t0) * 1000
+                        gen.update(
+                            output=result,
+                            usage={
+                                "input":  usage.get("prompt_tokens", 0),
+                                "output": usage.get("completion_tokens", 0),
+                                "total":  usage.get("total_tokens", 0),
+                            },
+                            metadata={
+                                "stage":      stage,
+                                "call_id":    call_id,
+                                "elapsed_ms": round(elapsed_ms),
+                            },
+                        )
             except Exception as e:
                 print(f"[langfuse] trace error (non-fatal): {e}")
                 t0 = time.perf_counter()
