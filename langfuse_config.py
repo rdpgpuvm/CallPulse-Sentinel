@@ -113,31 +113,11 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
     async def _wrapped(stage: str, system_prompt: str, user_prompt: str,
                        json_schema: dict, max_tokens: int = 64):
         call_id = _current_call_id.get()
-        t0 = time.perf_counter()
-        result = await generate_json_fn(stage, system_prompt, user_prompt,
-                                        json_schema, max_tokens)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-
         usage = stage_token_usage.get(stage, {})
-        record = {
-            "ts":          datetime.now(timezone.utc).isoformat(),
-            "call_id":     call_id,
-            "session_id":  _session_id,
-            "stage":       stage,
-            "model":       served_model_name,
-            "elapsed_ms":  round(elapsed_ms),
-            "usage": {
-                "input":   usage.get("prompt_tokens", 0),
-                "output":  usage.get("completion_tokens", 0),
-                "total":   usage.get("total_tokens", 0),
-            },
-            "output": result,
-        }
-
-        # ── cache for GUI panel (always, regardless of mode) ─────────────────
-        _call_traces.setdefault(call_id, []).append(record)
 
         if _lf is not None:
+            # wrap the LLM call INSIDE the context manager so Langfuse measures
+            # the real inference latency, not just the time to call gen.update()
             try:
                 with _lf.start_as_current_observation(
                     as_type="generation",
@@ -148,23 +128,52 @@ def patch_generate_json(generate_json_fn, stage_token_usage: dict, served_model_
                         {"role": "user",   "content": user_prompt},
                     ],
                 ) as gen:
+                    t0 = time.perf_counter()
+                    result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                                    json_schema, max_tokens)
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
                     gen.update(
                         output=result,
                         usage={
-                            "input":  record["usage"]["input"],
-                            "output": record["usage"]["output"],
-                            "total":  record["usage"]["total"],
+                            "input":  usage.get("prompt_tokens", 0),
+                            "output": usage.get("completion_tokens", 0),
+                            "total":  usage.get("total_tokens", 0),
                         },
                         metadata={
                             "stage":      stage,
                             "call_id":    call_id,
                             "session_id": _session_id,
-                            "elapsed_ms": record["elapsed_ms"],
+                            "elapsed_ms": round(elapsed_ms),
                         },
                     )
             except Exception as e:
                 print(f"[langfuse] trace error (non-fatal): {e}")
+                t0 = time.perf_counter()
+                result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                                json_schema, max_tokens)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
         else:
+            t0 = time.perf_counter()
+            result = await generate_json_fn(stage, system_prompt, user_prompt,
+                                            json_schema, max_tokens)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        record = {
+            "ts":         datetime.now(timezone.utc).isoformat(),
+            "call_id":    call_id,
+            "session_id": _session_id,
+            "stage":      stage,
+            "model":      served_model_name,
+            "elapsed_ms": round(elapsed_ms),
+            "usage": {
+                "input":  usage.get("prompt_tokens", 0),
+                "output": usage.get("completion_tokens", 0),
+                "total":  usage.get("total_tokens", 0),
+            },
+            "output": result,
+        }
+        _call_traces.setdefault(call_id, []).append(record)
+        if _lf is None:
             _log_local(record)
 
         return result
