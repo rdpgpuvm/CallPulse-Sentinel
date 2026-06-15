@@ -196,6 +196,16 @@ PAGE = r"""<!DOCTYPE html>
   .chip.reason { background:rgba(218,54,51,.25); color:#ffa198; font-weight:500; }
   .chip.sent   { background:rgba(110,118,129,.3); color:var(--dim); }
   .chip.time   { background:rgba(110,118,129,.18); color:var(--dim); font-weight:500; }
+  /* ── Customer sentiment traffic-light (render-time only; reuses the judge's
+     sentiment score, so ZERO extra model cost / lossless). Square outline + the
+     word "sentiment"; outline and text share one colour via currentColor, set
+     the instant the turn renders per the judgement. ── */
+  .sent-band { display:inline-block; margin-top:7px; padding:3px 11px; font-size:10.5px;
+               font-weight:700; letter-spacing:.7px; text-transform:uppercase;
+               border:1.5px solid currentColor; border-radius:3px; background:transparent; }
+  .sent-band.sat { color:#3fb950; }   /* satisfied  — green  (sentiment >= +1) */
+  .sent-band.neu { color:#d29922; }   /* neutral    — yellow (sentiment  0)    */
+  .sent-band.dis { color:#f85149; }   /* dissatisfied — red  (sentiment <= -1) */
 
   .lf-btn { margin-left:10px; padding:3px 10px; font-size:11px; font-weight:600;
     background:none; border:1px solid var(--line); border-radius:4px;
@@ -596,6 +606,13 @@ function panel(callId) {
   return calls[callId];
 }
 
+/* sentiment -> traffic-light band. Pure mapping of the judge's existing score;
+   no network/model call, so it never adds latency. */
+function sentBand(s){
+  if (s >= 1)  return ['sat', 'satisfied'];
+  if (s <= -1) return ['dis', 'dissatisfied'];
+  return ['neu', 'neutral'];
+}
 /* ---------- render ---------- */
 function render(ev) {
   if (ev.type === 'turn') {
@@ -624,8 +641,14 @@ function render(ev) {
     ev.violations.forEach(v => chips = '<span class="chip code">' + v + '</span>' + chips);
     if (ev.violations.length && ev.reason)
       chips += '<span class="chip reason">' + ev.reason + '</span>';
+    let band = '';
+    if (ev.role === 'customer') {                 // badge sits under the customer chat bar only
+      const sb = sentBand(ev.sentiment);
+      band = '<div class="sent-band ' + sb[0] + '" title="customer ' + sb[1] +
+             ' (sentiment ' + (ev.sentiment >= 0 ? '+' : '') + ev.sentiment + ')">sentiment</div>';
+    }
     t.innerHTML = '<div class="who">' + who + ' · t' + ev.turn_number + '</div>' +
-                  ev.text + '<div class="chips">' + chips + '</div>';
+                  ev.text + '<div class="chips">' + chips + '</div>' + band;
     p.querySelector('.turns').appendChild(t);
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     statusEl.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';

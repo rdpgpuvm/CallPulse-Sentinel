@@ -259,8 +259,8 @@ AUDIO FILE (WAV/MP3/FLAC)
   │  │  Output: {speaker, sentiment, violations, reason} │   │
   │  │          ~32-48 tokens, single pass, no retries   │   │
   │  │                                                   │   │
-  │  │  speaker: "rep"|"customer"  (3-tier: stereo ch    │   │
-  │  │           metadata → regex → LLM fallback)        │   │
+  │  │  speaker: "rep"|"customer"  (stereo: calibrate   │   │
+  │  │           +lock channel; mono: regex → LLM)       │   │
   │  │  sentiment: -2..2  (customer only)                │   │
   │  │  violations: [code, ...]  (policy codes)          │   │
   │  │  reason: string, max 35 chars                     │   │
@@ -328,13 +328,32 @@ With prefix caching enabled the 300-token system prompt is computed once and reu
 
 ### Speaker identification — 3-tier pipeline
 
-Speaker role (`rep` / `customer`) is resolved by a **3-tier priority chain** before each judge call:
+Speaker role (`rep` / `customer`) is resolved differently depending on whether the audio carries clean channel separation.
 
-1. **Stereo channel metadata** — stereo recordings split each channel separately; ch0=rep, ch1=customer is telephony ground-truth. The Brain reads this directly; no regex or LLM is consulted.
-2. **Keyword regex pre-pass** (`_guess_mono_speaker`) — for mono recordings, obvious lexical markers are matched in microseconds at zero token cost. Customer markers: *"your agent"*, *"loyal member"*, *"you work for me"*, *"the customer is always right"*, *"get me your manager"*. Rep markers: *"how can I help"*, *"let me pull up"*, *"one moment"*, *"you were speaking with"*. Returns `'rep'`, `'customer'`, or `None` (ambiguous).
-3. **LLM `speaker` field** — fallback only when regex is ambiguous. The verdict rides the same judge forward pass as sentiment and violations, so it costs zero additional latency or tokens. The system prompt includes alternation context ("previous turn was rep → expect customer") to help within the tight token budget.
+**Stereo / multi-channel audio — calibrate once, then lock (preferred).** Each channel carries exactly one speaker for the whole call, but telephony does **not** guarantee that channel 0 is the rep. So the Brain spends the LLM only at the **start of the call**: over the first few turns it reads the judge's `speaker` field (reinforced by the zero-token regex pre-pass) and votes per channel. Once a channel shows a confident winner, the `channel → role` map is **locked** (and the partner line is mirrored). For the rest of the call the role is assigned **purely from the channel index** — the LLM is never spent on speaker identification again, so there is no per-turn GPU cost for speaker ID. If calibration stays ambiguous past 8 turns it falls back to the `ch0=rep` telephony convention, so it can never stall.
 
-**In a live deployment** the telephony/CTI layer (Genesys, Avaya, Amazon Connect, Twilio, etc.) supplies channel metadata and tiers 2 and 3 never run — speaker is a one-line lookup from stream metadata.
+**Mono / single-channel audio — accurate LLM identification at zero extra cost.** When there is no channel separation the speaker rides the same judge forward pass that already produces sentiment and violations, so it adds no latency or tokens. Two tiers:
+
+1. **Keyword regex pre-pass** (`_guess_mono_speaker`) — obvious lexical markers matched in microseconds at zero token cost. Customer markers: *"your agent"*, *"loyal member"*, *"you work for me"*, *"the customer is always right"*, *"get me your manager"*. Rep markers: *"how can I help"*, *"let me pull up"*, *"one moment"*, *"you were speaking with"*. Returns `'rep'`, `'customer'`, or `None`.
+2. **LLM `speaker` field** — used when regex is ambiguous. The prompt now favours **speaker continuity** rather than strict alternation: because a 5-second chunk frequently splits one person's sentence across turns, the same speaker is assumed to continue unless the content clearly shows the other party is now talking. This fixes single sentences being mislabelled across the rep/customer boundary at chunk edges.
+
+**In a live deployment** the telephony/CTI layer (Genesys, Avaya, Amazon Connect, Twilio, etc.) supplies channel metadata, so only the brief stereo calibration runs (or is skipped entirely if the layer also tags role) — speaker is otherwise a one-line lookup from stream metadata.
+
+### Customer sentiment traffic-light (satisfied / neutral / dissatisfied)
+
+Every judge verdict already includes a `sentiment` score in `-2..2` for the customer. That single number is mapped — at **render time only** — to a three-state traffic light, so the feature is **lossless and adds zero model cost** (no extra LLM call, no added latency):
+
+| Sentiment score | State | Colour |
+|---|---|---|
+| `>= +1` | satisfied | 🟢 green |
+| `0` | neutral | 🟡 yellow |
+| `<= -1` | dissatisfied | 🔴 red |
+
+**In the dashboard (`gui_server.py`):** customer chat bubbles get a small square-outlined badge containing the word *"sentiment"*. The outline and the text share one colour (via `currentColor`), set the instant the turn renders according to the judgement — green / yellow / red. The badge appears only under **customer** turns (rep turns carry no customer-sentiment signal). Hovering shows the exact state and score. The mapping lives in `sentBand()` in `gui_server.py` and is mirrored by `_sentiment_band()` in the notebook.
+
+**In the notebook cell output:** the same three-state band is printed as a colour-coded `[ sentiment ]` token (ANSI green / yellow / red) next to each customer turn, so the live run is readable without opening the dashboard.
+
+Because both surfaces read the score the judge already returns, the traffic light never disagrees with the deterministic Rule 3 escalation (two consecutive customer turns at `<= -2`).
 
 ### Langfuse observability
 
