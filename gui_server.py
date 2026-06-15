@@ -417,29 +417,42 @@ function joinCall(callId) {
 function refreshEscList(callId) {
   const items = calls[callId].querySelector('.esc-items');
   items.innerHTML = '';
-  callData[callId].escalations.forEach((esc, idx) => {
-    const item = document.createElement('div');
-    item.className = 'esc-item';
-    const textId = 'esc-txt-' + callId + '-' + idx;
-    item.innerHTML =
-      '<span class="esc-ts">'  + fmtTime(esc.audio_start_s) + '</span>' +
-      '<span class="esc-turn">t' + esc.turn_number + '</span>' +
-      '<span class="esc-rule">' + (esc.rule || '') + '</span>' +
-      '<button class="esc-expand" onclick="' +
-        'var b=document.getElementById(\'' + textId + '\');' +
-        'b.classList.toggle(\'open\');' +
-        'this.textContent=b.classList.contains(\'open\')?\'+\' hide\':\'+ show\';' +
-        'event.stopPropagation();">+ show</button>' +
-      '<span class="esc-seek" onclick="seekTo(\'' + callId + '\',' + esc.audio_start_s + ');event.stopPropagation()">▶ seek</span>';
-    const textBlock = document.createElement('div');
-    textBlock.className = 'esc-text-block';
-    textBlock.id = textId;
-    textBlock.textContent = esc.detail || '';
+  callData[callId].escalations.forEach((esc) => {
+    // Built with real DOM nodes + addEventListener (NOT inline onclick strings):
+    // robust against call IDs containing dots/quotes and avoids handler-parse failures.
     const wrap = document.createElement('div');
     wrap.style.borderBottom = '1px solid var(--line)';
     wrap.style.padding = '2px 0';
-    wrap.appendChild(item);
-    wrap.appendChild(textBlock);
+
+    const item = document.createElement('div');
+    item.className = 'esc-item';
+
+    const ts = document.createElement('span');
+    ts.className = 'esc-ts';   ts.textContent = fmtTime(esc.audio_start_s);
+    const turn = document.createElement('span');
+    turn.className = 'esc-turn'; turn.textContent = 't' + esc.turn_number;
+    const rule = document.createElement('span');
+    rule.className = 'esc-rule'; rule.textContent = esc.rule || '';
+
+    const textBlock = document.createElement('div');
+    textBlock.className = 'esc-text-block';
+    textBlock.textContent = esc.detail || '(no transcript captured)';
+
+    const expand = document.createElement('button');
+    expand.className = 'esc-expand';
+    expand.textContent = '+ show';
+    expand.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const open = textBlock.classList.toggle('open');   // reveal/hide the flagged transcript line
+      expand.textContent = open ? '+ hide' : '+ show';
+    });
+
+    const seek = document.createElement('span');
+    seek.className = 'esc-seek'; seek.textContent = '▶ seek';
+    seek.addEventListener('click', (e) => { e.stopPropagation(); seekTo(callId, esc.audio_start_s); });
+
+    item.append(ts, turn, rule, expand, seek);
+    wrap.append(item, textBlock);
     items.appendChild(wrap);
   });
 }
