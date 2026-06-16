@@ -520,6 +520,9 @@ async function toggleLangfuse(callId) {
   }
   btn.classList.remove('loading'); btn.textContent = 'info';
   panel.classList.add('open');
+  // chat can be long, so scroll the info panel into view — otherwise opening it
+  // looks like nothing happened because it's below the fold.
+  requestAnimationFrame(() => panel.scrollIntoView({ behavior: 'smooth', block: 'center' }));
 }
 
 function renderLangfuse(panel, records) {
