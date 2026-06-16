@@ -318,12 +318,15 @@ PAGE = r"""<!DOCTYPE html>
     <input type="checkbox" id="syncCheck" style="margin-right:5px">Sync audio
   </label>
   <button class="hbtn" id="cleanToggle">Simple</button>
+  <button class="hbtn" id="soundBtn" title="Enable escalation alert sound (one click — needed once per session)">&#128276; Enable sound</button>
 </header>
 <div id="tabs"></div>
 <div id="calls"></div>
 <script>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
 const statusEl = document.getElementById('status');
+const soundBtn = document.getElementById('soundBtn');
+soundBtn.onclick = () => unlockAudio(true);
 
 const calls    = {};
 const callData = {};
@@ -768,24 +771,17 @@ function showTranscript(callId) {
   };
   _txModal.classList.add("open");
 }
-/* escalation chime — short two-note bell via Web Audio (no asset, independent of
-   the <audio> player so it works whether or not call audio is playing). Fires on
-   EVERY live escalation; history replay/refresh stays silent (gated by `live` in
-   render). The context is unlocked on ANY gesture and re-resumed before each chime. */
-let _audioCtx = null;
-function _ensureAudio() {
-  try {
-    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  } catch (e) { return null; }
-  return _audioCtx;
+/* escalation chime — Web Audio bell, independent of the <audio> player. Browser
+   policy blocks ALL sound until the page gets a user gesture, so we expose an
+   explicit "Enable sound" button (one click per session); any gesture also unlocks.
+   An escalation that fires BEFORE sound is enabled is remembered and rings the
+   instant it is unlocked, and the button flags the missed alert meanwhile. */
+let _audioCtx = null, _soundReady = false, _pendingChime = false;
+function _setSoundBtn() {
+  const b = document.getElementById("soundBtn"); if (!b) return;
+  if (_soundReady) { b.textContent = "\uD83D\uDD14 Sound on"; b.classList.add("on"); }
+  else { b.textContent = _pendingChime ? "\uD83D\uDD14 Enable sound (missed alert!)" : "\uD83D\uDD14 Enable sound"; b.classList.remove("on"); }
 }
-/* keep audio unlocked on ANY gesture (capture, not once) so a backgrounded/suspended
-   tab re-resumes on the next interaction — no dependency on pressing play. */
-["pointerdown", "keydown", "click"].forEach(evt =>
-  window.addEventListener(evt, () => {
-    const c = _ensureAudio();
-    if (c && c.state === "suspended") c.resume().catch(() => {});
-  }, true));
 function _chimeTones(ctx) {
   const now = ctx.currentTime;
   [[880, 0.0], [1174.7, 0.16]].forEach(pair => {
@@ -798,12 +794,26 @@ function _chimeTones(ctx) {
     osc.start(now + pair[1]); osc.stop(now + pair[1] + 0.55);
   });
 }
+function unlockAudio(testTick) {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  } catch (e) { return; }
+  const done = () => {
+    _soundReady = (_audioCtx.state === "running");
+    if (_soundReady && _pendingChime) { _pendingChime = false; _chimeTones(_audioCtx); }
+    else if (_soundReady && testTick) { _chimeTones(_audioCtx); }
+    _setSoundBtn();
+  };
+  if (_audioCtx.state === "suspended") _audioCtx.resume().then(done).catch(() => {});
+  else done();
+}
+/* any gesture also unlocks (capture phase, repeated) — covers clicking anywhere */
+["pointerdown", "keydown", "click"].forEach(evt =>
+  window.addEventListener(evt, () => unlockAudio(false), true));
 function playChime() {
-  const ctx = _ensureAudio();
-  if (!ctx) return;
-  // resume FIRST, then schedule — scheduling on a suspended context is silent.
-  if (ctx.state === "suspended") ctx.resume().then(() => _chimeTones(ctx)).catch(() => {});
-  else _chimeTones(ctx);
+  if (_audioCtx && _audioCtx.state === "running") { _chimeTones(_audioCtx); return; }
+  _pendingChime = true; _setSoundBtn();   // not unlocked yet -> ring on enable
+  unlockAudio(false);                      // best-effort (works if a gesture happened recently)
 }
 /* ---------- render ---------- */
 function render(ev, live) {
