@@ -768,23 +768,25 @@ function showTranscript(callId) {
   };
   _txModal.classList.add("open");
 }
-/* escalation chime — short two-note bell via Web Audio (no asset). Plays ONCE per
-   escalation, on LIVE alerts only (never on history replay/refresh). Audio is
-   unlocked on the first user gesture, per browser autoplay policy. */
+/* escalation chime — short two-note bell via Web Audio (no asset, independent of
+   the <audio> player so it works whether or not call audio is playing). Fires on
+   EVERY live escalation; history replay/refresh stays silent (gated by `live` in
+   render). The context is unlocked on ANY gesture and re-resumed before each chime. */
 let _audioCtx = null;
-const _chimed = new Set();
 function _ensureAudio() {
   try {
     if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (_audioCtx.state === "suspended") _audioCtx.resume();
   } catch (e) { return null; }
   return _audioCtx;
 }
-window.addEventListener("pointerdown", _ensureAudio, { once: true });
-function playChime(callId) {
-  if (callId) { if (_chimed.has(callId)) return; _chimed.add(callId); }   // one chime per escalation
-  const ctx = _ensureAudio();
-  if (!ctx) return;
+/* keep audio unlocked on ANY gesture (capture, not once) so a backgrounded/suspended
+   tab re-resumes on the next interaction — no dependency on pressing play. */
+["pointerdown", "keydown", "click"].forEach(evt =>
+  window.addEventListener(evt, () => {
+    const c = _ensureAudio();
+    if (c && c.state === "suspended") c.resume().catch(() => {});
+  }, true));
+function _chimeTones(ctx) {
   const now = ctx.currentTime;
   [[880, 0.0], [1174.7, 0.16]].forEach(pair => {
     const osc = ctx.createOscillator(), gain = ctx.createGain();
@@ -795,6 +797,13 @@ function playChime(callId) {
     osc.connect(gain); gain.connect(ctx.destination);
     osc.start(now + pair[1]); osc.stop(now + pair[1] + 0.55);
   });
+}
+function playChime() {
+  const ctx = _ensureAudio();
+  if (!ctx) return;
+  // resume FIRST, then schedule — scheduling on a suspended context is silent.
+  if (ctx.state === "suspended") ctx.resume().then(() => _chimeTones(ctx)).catch(() => {});
+  else _chimeTones(ctx);
 }
 /* ---------- render ---------- */
 function render(ev, live) {
@@ -844,7 +853,7 @@ function render(ev, live) {
       seekTo(ev.call_id, ev.audio_start_s);
 
   } else if (ev.type === 'alert') {
-    if (live) playChime(ev.call_id);          // one bell per live escalation
+    if (live) playChime();                    // bell on EVERY live escalation
     const p = panel(ev.call_id);
     p.classList.add('escalated');
     const b = document.createElement('div');
@@ -890,7 +899,6 @@ function render(ev, live) {
     document.getElementById('calls').innerHTML = '';
     selectedCall = null;
     cursor = 0;
-    _chimed.clear();
     document.title = 'CallPulse Sentinel — LIVE';
     statusEl.textContent = 'dashboard cleared — waiting for new run…';
   }
