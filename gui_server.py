@@ -193,7 +193,21 @@ PAGE = r"""<!DOCTYPE html>
   .chips { margin-top:6px; display:flex; gap:6px; flex-wrap:wrap; }
   .chip { font-size:10.5px; padding:2px 8px; border-radius:10px; font-weight:700; }
   .chip.code   { background:var(--bad); color:#fff; }
-  .chip.reason { background:rgba(218,54,51,.25); color:#ffa198; font-weight:500; }
+  .chip.reason { background:rgba(218,54,51,.25); color:#ffa198; font-weight:500;
+                 cursor:pointer; max-width:300px; overflow:hidden; text-overflow:ellipsis;
+                 white-space:nowrap; vertical-align:bottom; }
+  .chip.reason:hover { filter:brightness(1.18); text-decoration:underline; }
+  /* click-to-expand reason dialog (full escalation reason, no mid-sentence cut-off) */
+  .reason-modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
+                  align-items:center; justify-content:center; z-index:50; }
+  .reason-modal.open { display:flex; }
+  .reason-modal-box { background:var(--panel); border:1px solid var(--bad); border-radius:12px;
+                      max-width:460px; width:90%; padding:18px 20px; box-shadow:0 12px 44px rgba(0,0,0,.55); }
+  .reason-modal-box h3 { margin:0 0 8px; font-size:12.5px; letter-spacing:.6px; color:#ffa198; text-transform:uppercase; }
+  .reason-modal-box .rm-meta { font-size:11px; color:var(--dim); margin-bottom:10px; }
+  .reason-modal-box .rm-text { font-size:14.5px; line-height:1.55; color:var(--text); white-space:pre-wrap; }
+  .reason-modal-box .rm-close { margin-top:16px; padding:5px 16px; border:none; border-radius:8px;
+                                background:var(--bad); color:#fff; font-weight:600; cursor:pointer; }
   .chip.sent   { background:rgba(110,118,129,.3); color:var(--dim); }
   .chip.time   { background:rgba(110,118,129,.18); color:var(--dim); font-weight:500; }
   /* ── Customer sentiment traffic-light (render-time only; reuses the judge's
@@ -626,6 +640,32 @@ function sentBand(s){
   if (s <= -1) return ['dis', 'dissatisfied'];
   return ['neu', 'neutral'];
 }
+/* full-reason dialog — the reason chip is truncated with an ellipsis; clicking it
+   shows the complete judge reason in a small modal (Esc or click-outside to close). */
+let _reasonModal = null;
+function showReasonDialog(reason, ev) {
+  if (!_reasonModal) {
+    _reasonModal = document.createElement("div");
+    _reasonModal.className = "reason-modal";
+    _reasonModal.innerHTML =
+      '<div class="reason-modal-box">' +
+        '<h3>Escalation reason</h3>' +
+        '<div class="rm-meta"></div>' +
+        '<div class="rm-text"></div>' +
+        '<button class="rm-close">Close</button>' +
+      '</div>';
+    document.body.appendChild(_reasonModal);
+    const closeIt = () => _reasonModal.classList.remove("open");
+    _reasonModal.addEventListener("click", (e) => { if (e.target === _reasonModal) closeIt(); });
+    _reasonModal.querySelector(".rm-close").addEventListener("click", closeIt);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeIt(); });
+  }
+  _reasonModal.querySelector(".rm-meta").textContent =
+    ((ev.violations && ev.violations.length) ? ev.violations.join(", ") + " \u00b7 " : "") +
+    "turn t" + ev.turn_number + (ev.role ? " \u00b7 " + ev.role : "");
+  _reasonModal.querySelector(".rm-text").textContent = reason || "(no reason provided)";
+  _reasonModal.classList.add("open");
+}
 /* ---------- render ---------- */
 function render(ev) {
   if (ev.type === 'turn') {
@@ -663,6 +703,8 @@ function render(ev) {
     t.innerHTML = '<div class="who">' + who + ' · t' + ev.turn_number + '</div>' +
                   ev.text + '<div class="chips">' + chips + '</div>' + band;
     p.querySelector('.turns').appendChild(t);
+    const _rc = t.querySelector('.chip.reason');           // click reason -> full dialog
+    if (_rc) _rc.addEventListener('click', () => showReasonDialog(ev.reason, ev));
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     statusEl.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
     if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined)
