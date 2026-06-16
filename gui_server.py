@@ -810,6 +810,10 @@ function unlockAudio(testTick) {
 /* any gesture also unlocks (capture phase, repeated) — covers clicking anywhere */
 ["pointerdown", "keydown", "click"].forEach(evt =>
   window.addEventListener(evt, () => unlockAudio(false), true));
+/* best-effort arm at page load: works only if the browser already permits audio
+   (site set to "always allow sound", high media-engagement, etc.); otherwise it
+   stays suspended and the first gesture above arms it. No way to force it earlier. */
+try { unlockAudio(false); } catch (e) {}
 function playChime() {
   if (_audioCtx && _audioCtx.state === "running") { _chimeTones(_audioCtx); return; }
   _pendingChime = true; _setSoundBtn();   // not unlocked yet -> ring on enable
