@@ -10,12 +10,14 @@ override controls, audio seeking, and escalation review.
 ## Quick Start
 
 ```bash
-# Clone the branch you want
-git clone -b v7      https://github.com/rdpgpuvm/Project1.git /workspace/CallModV7
-git clone -b vosktest https://github.com/rdpgpuvm/Project1.git /workspace/CallModVosk
+# Clone the repo
+git clone https://github.com/rdpgpuvm/CallPulse-Sentinel.git
+cd CallPulse-Sentinel
 
-# Start vLLM + GUI dashboard (leave this terminal running)
-cd /workspace/CallModV7
+# (optional) enable Langfuse monitoring — copy the template and add your keys
+cp .env.example .env
+
+# Start vLLM + the live GUI dashboard (leave this terminal running)
 bash run_vllm_server.sh
 
 # Then run call_moderator_gui.ipynb cell by cell in Tab 2
@@ -23,14 +25,16 @@ bash run_vllm_server.sh
 
 ---
 
-## Branch Differences
+## ASR modes (runtime toggle — single branch, no branches to pick)
 
-| | v7 | vosktest |
+One ASR path, two runtime modes, chosen by `REALTIME_SINGLE_CALL` in Cell 8:
+
+| Mode | ASR | When to use |
 |---|---|---|
-| ASR | whisper-large-v3-turbo (CPU int8 file / GPU fp16 live) | Vosk/Kaldi CPU-only |
-| GPU for ASR | Optional (GPU fp16 live mode) | Never — 100% CPU |
-| GPU for LLM | Always (vLLM AMD ROCm) | Always (vLLM AMD ROCm) |
-| When to use | Best accuracy | GPU-constrained / CPU-only fallback |
+| Real-time (`REALTIME_SINGLE_CALL = True`) | whisper-large-v3-turbo **fp16 on GPU** (~150–400 ms/chunk), 5s live pacing | Live monitoring; auto-falls back to CPU int8 if no GPU |
+| Bulk / file (`REALTIME_SINGLE_CALL = False`) | faster-whisper large-v3-turbo **CPU int8**, full-file with confidence gates | Offline, max-accuracy batch |
+
+The LLM judge (Qwen3-4B via vLLM) always runs on the AMD GPU.
 
 ---
 
@@ -151,13 +155,13 @@ The Sessions view shows aggregate token usage, total cost, and a latency timelin
 
 ## Recordings included
 
-| Folder | Files | Source |
+| Folder | Files | Notes |
 |---|---|---|
-| `call_recordings/` | 5 FLAC files (Amazon, Ubereats, Prezzee, Paramount+, Spin) | [Kaggle unidpro/call-center-audio](https://www.kaggle.com/datasets/unidpro/call-center-audio) |
-| `scam_call/` | 4 WAV files | Committed scam call recordings |
+| `scam_call/` | `call_recording1.mp3`, `call_recording2.mp3` | Two demo/test calls (stereo scam-awareness scenarios) |
 
-Best for testing override UI: `CA769e290725c8cb356344c837470375f2` (Amazon, 26 min) —
-set `SELECTED_CALL_ID` in Cell 8 to target it.
+Leave `SELECTED_CALL_IDS = ""` in Cell 8 to pick one at random, or set it to a
+stem (e.g. `"call_recording1"`) to target a specific recording. Drop more audio
+into `scam_call/` and it is picked up automatically.
 
 ---
 
