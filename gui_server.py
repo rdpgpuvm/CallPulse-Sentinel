@@ -220,6 +220,15 @@ PAGE = r"""<!DOCTYPE html>
   .sent-band.sat { color:#3fb950; }   /* satisfied  — green  (sentiment >= +1) */
   .sent-band.neu { color:#d29922; }   /* neutral    — yellow (sentiment  0)    */
   .sent-band.dis { color:#f85149; }   /* dissatisfied — red  (sentiment <= -1) */
+  .sent-band { position:relative; }
+  .sent-band::after {                 /* hover tooltip: Good / Neutral / Bad + score */
+    content:attr(data-tip); position:absolute; left:50%; bottom:calc(100% + 7px);
+    transform:translateX(-50%) translateY(3px); white-space:nowrap; pointer-events:none;
+    background:#0d1117; color:currentColor; border:1px solid currentColor; border-radius:6px;
+    padding:4px 9px; font-size:11px; font-weight:600; letter-spacing:.3px; text-transform:none;
+    opacity:0; transition:opacity .12s ease, transform .12s ease; z-index:30;
+    box-shadow:0 4px 14px rgba(0,0,0,.45); }
+  .sent-band:hover::after { opacity:1; transform:translateX(-50%) translateY(0); }
 
   .lf-btn { margin-left:10px; padding:3px 10px; font-size:11px; font-weight:600;
     background:none; border:1px solid var(--line); border-radius:4px;
@@ -639,9 +648,9 @@ function panel(callId) {
 /* sentiment -> traffic-light band. Pure mapping of the judge's existing score;
    no network/model call, so it never adds latency. */
 function sentBand(s){
-  if (s >= 1)  return ['sat', 'satisfied'];
-  if (s <= -1) return ['dis', 'dissatisfied'];
-  return ['neu', 'neutral'];
+  if (s >= 1)  return ['sat', 'satisfied',    'Good'];
+  if (s <= -1) return ['dis', 'dissatisfied', 'Bad'];
+  return ['neu', 'neutral', 'Neutral'];
 }
 /* full-reason dialog — the reason chip is truncated with an ellipsis; clicking it
    shows the complete judge reason in a small modal (Esc or click-outside to close). */
@@ -700,8 +709,9 @@ function render(ev) {
     let band = '';
     if (ev.role === 'customer') {                 // badge sits under the customer chat bar only
       const sb = sentBand(ev.sentiment);
-      band = '<div class="sent-band ' + sb[0] + '" title="customer ' + sb[1] +
-             ' (sentiment ' + (ev.sentiment >= 0 ? '+' : '') + ev.sentiment + ')">sentiment</div>';
+      const _sv = (ev.sentiment >= 0 ? '+' : '') + ev.sentiment;
+      const _tip = sb[2] + ' — ' + sb[1] + ' (sentiment ' + _sv + ')';
+      band = '<div class="sent-band ' + sb[0] + '" data-tip="' + _tip + '" title="' + _tip + '">sentiment</div>';
     }
     t.innerHTML = '<div class="who">' + who + ' · t' + ev.turn_number + '</div>' +
                   ev.text + '<div class="chips">' + chips + '</div>' + band;
