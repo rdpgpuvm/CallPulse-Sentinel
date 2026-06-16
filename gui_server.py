@@ -238,6 +238,33 @@ PAGE = r"""<!DOCTYPE html>
   .lf-panel { display:none; border-top:1px solid var(--line);
     padding:12px 16px; font-size:12px; }
   .lf-panel.open { display:block; }
+  /* info-panel header + Full transcript button */
+  .lf-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .lf-head-title { font-size:11px; font-weight:700; letter-spacing:.6px; text-transform:uppercase; color:var(--dim); }
+  .lf-tx-btn { padding:4px 12px; font-size:11px; font-weight:600; cursor:pointer; border:1px solid var(--rep);
+               border-radius:8px; background:rgba(31,111,235,.15); color:var(--repglow); }
+  .lf-tx-btn:hover { filter:brightness(1.15); }
+  /* full-transcript modal */
+  .tx-modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none;
+             align-items:center; justify-content:center; z-index:60; }
+  .tx-modal.open { display:flex; }
+  .tx-box { background:var(--panel); border:1px solid var(--line); border-radius:12px; width:90%;
+           max-width:680px; max-height:80vh; display:flex; flex-direction:column;
+           box-shadow:0 12px 44px rgba(0,0,0,.55); }
+  .tx-head { display:flex; align-items:center; justify-content:space-between;
+            padding:13px 18px; border-bottom:1px solid var(--line); }
+  .tx-head h3 { margin:0; font-size:12.5px; letter-spacing:.6px; text-transform:uppercase; color:var(--text); }
+  .tx-actions button { margin-left:8px; padding:4px 12px; border:none; border-radius:8px;
+                      font-weight:600; font-size:12px; cursor:pointer; }
+  .tx-copy { background:var(--rep); color:#fff; }
+  .tx-close { background:#30363d; color:var(--text); }
+  .tx-body { overflow-y:auto; padding:14px 18px; }
+  .tx-block { margin-bottom:13px; }
+  .tx-who { font-size:10.5px; font-weight:700; letter-spacing:.7px; text-transform:uppercase; margin-bottom:3px; }
+  .tx-who.rep { color:var(--repglow); }
+  .tx-who.customer { color:var(--custglow); }
+  .tx-text { font-size:14px; line-height:1.55; color:var(--text); }
+  .tx-empty { color:var(--dim); font-size:13px; padding:10px 0; }
   .lf-section { margin-bottom:14px; }
   .lf-section-title { font-size:10px; font-weight:700; letter-spacing:.8px;
     color:var(--dim); text-transform:uppercase; margin-bottom:6px; }
@@ -523,7 +550,7 @@ async function toggleLangfuse(callId) {
   try {
     const r   = await fetch(base + 'langfuse/' + callId);
     const dat = await r.json();
-    renderLangfuse(panel, dat.records || []);
+    renderLangfuse(panel, dat.records || [], callId);
   } catch(e) {
     panel.innerHTML = '<div class="lf-no-data">Could not load Langfuse data: ' + e + '</div>';
   }
@@ -534,9 +561,12 @@ async function toggleLangfuse(callId) {
   requestAnimationFrame(() => panel.scrollIntoView({ behavior: 'smooth', block: 'center' }));
 }
 
-function renderLangfuse(panel, records) {
+function renderLangfuse(panel, records, callId) {
+  const _head = '<div class="lf-head"><span class="lf-head-title">Call info</span>' +
+                '<button class="lf-tx-btn">Full transcript</button></div>';
   if (!records.length) {
-    panel.innerHTML = '<div class="lf-no-data">No Langfuse data yet — run a call first.</div>';
+    panel.innerHTML = _head + '<div class="lf-no-data">No Langfuse data yet — run a call first.</div>';
+    _txWire(panel, callId);
     return;
   }
   const totalIn  = records.reduce((s,r) => s + (r.usage?.input  || 0), 0);
@@ -564,7 +594,7 @@ function renderLangfuse(panel, records) {
       '<td>' + (r.usage?.input||0) + '</td><td>' + (r.usage?.output||0) + '</td>' +
       '<td class="lf-verdict" title="' + verdict.replace(/"/g,'&quot;') + '">' + verdict + '</td></tr>';
   });
-  panel.innerHTML =
+  panel.innerHTML = _head +
     '<div class="lf-section"><div class="lf-section-title">Token Usage</div>' +
       '<div class="lf-kv">' +
         '<span class="k">Input tokens</span><span>' + totalIn + '</span>' +
@@ -581,6 +611,7 @@ function renderLangfuse(panel, records) {
       '<table class="lf-table"><thead><tr>' +
         '<th>#</th><th>Stage</th><th>Latency</th><th>In</th><th>Out</th><th>Verdict</th>' +
       '</tr></thead><tbody>' + genRows + '</tbody></table></div>';
+  _txWire(panel, callId);
 }
 
 /* ---------- panel factory ---------- */
@@ -639,7 +670,7 @@ function panel(callId) {
 
     calls[callId]    = div;
     callData[callId] = { audioEl: div.querySelector('audio'),
-                         escalations: [], skips: [], overridden: false };
+                         escalations: [], skips: [], turns: [], overridden: false };
     if (!selectedCall) selectCall(callId);
   }
   return calls[callId];
@@ -677,6 +708,65 @@ function showReasonDialog(reason, ev) {
     "turn t" + ev.turn_number + (ev.role ? " \u00b7 " + ev.role : "");
   _reasonModal.querySelector(".rm-text").textContent = reason || "(no reason provided)";
   _reasonModal.classList.add("open");
+}
+/* full-transcript dialog — speaker-grouped, de-duped paragraphs from the live turns.
+   Built with textContent so arbitrary transcript text is escaped safely. */
+function _txBlocks(turns) {
+  const blocks = []; let cur = null;
+  (turns || []).forEach(tn => {
+    const role = tn.role || "speaker";
+    const text = (tn.text || "").trim();
+    if (!text) return;
+    if (cur && cur.role === role) {
+      if (cur.parts[cur.parts.length - 1] !== text) cur.parts.push(text);   // de-dupe repeats
+    } else { cur = { role: role, parts: [text] }; blocks.push(cur); }
+  });
+  return blocks;
+}
+function _txWho(role) { return role === "rep" ? "Customer Rep" : (role === "customer" ? "Customer" : "Speaker"); }
+function _txWire(panel, callId) {
+  const b = panel.querySelector(".lf-tx-btn");
+  if (b) b.addEventListener("click", () => showTranscript(callId));
+}
+let _txModal = null;
+function showTranscript(callId) {
+  const cd = callData[callId];
+  const blocks = _txBlocks(cd && cd.turns);
+  if (!_txModal) {
+    _txModal = document.createElement("div");
+    _txModal.className = "tx-modal";
+    _txModal.innerHTML =
+      '<div class="tx-box">' +
+        '<div class="tx-head"><h3>Full transcript</h3><div class="tx-actions">' +
+          '<button class="tx-copy">Copy</button><button class="tx-close">Close</button>' +
+        '</div></div><div class="tx-body"></div></div>';
+    document.body.appendChild(_txModal);
+    const closeIt = () => _txModal.classList.remove("open");
+    _txModal.addEventListener("click", (e) => { if (e.target === _txModal) closeIt(); });
+    _txModal.querySelector(".tx-close").addEventListener("click", closeIt);
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeIt(); });
+  }
+  const body = _txModal.querySelector(".tx-body");
+  body.innerHTML = "";
+  if (!blocks.length) {
+    const e = document.createElement("div"); e.className = "tx-empty";
+    e.textContent = "No transcript yet for this call."; body.appendChild(e);
+  } else {
+    blocks.forEach(bk => {
+      const block = document.createElement("div"); block.className = "tx-block";
+      const w = document.createElement("div"); w.className = "tx-who " + bk.role; w.textContent = _txWho(bk.role);
+      const x = document.createElement("div"); x.className = "tx-text"; x.textContent = bk.parts.join(" ");
+      block.appendChild(w); block.appendChild(x); body.appendChild(block);
+    });
+  }
+  const copyBtn = _txModal.querySelector(".tx-copy");
+  copyBtn.textContent = "Copy";
+  copyBtn.onclick = () => {
+    const txt = blocks.map(bk => _txWho(bk.role) + ": " + bk.parts.join(" ")).join("\n\n");
+    if (navigator.clipboard) navigator.clipboard.writeText(txt).then(
+      () => { copyBtn.textContent = "Copied"; setTimeout(() => copyBtn.textContent = "Copy", 1200); }, () => {});
+  };
+  _txModal.classList.add("open");
 }
 /* ---------- render ---------- */
 function render(ev) {
@@ -718,6 +808,8 @@ function render(ev) {
     p.querySelector('.turns').appendChild(t);
     const _rc = t.querySelector('.chip.reason');           // click reason -> full dialog
     if (_rc) _rc.addEventListener('click', () => showReasonDialog(ev.reason, ev));
+    (callData[ev.call_id].turns || (callData[ev.call_id].turns = [])).push(   // for Full transcript
+      { role: ev.role, text: ev.text, turn_number: ev.turn_number });
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     statusEl.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
     if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined)
