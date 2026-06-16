@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live dashboard for the AI Call Moderator (v7).
+"""Live dashboard for CallPulse Sentinel (v7).
 
 New in v7:
   - Supervisor OVERRIDE: escalated calls show an ⚡ OVERRIDE button.  Clicking it
@@ -62,7 +62,7 @@ def find_audio_file(call_id: str):
 
 
 PAGE = r"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>AI Call Moderator — LIVE</title>
+<html><head><meta charset="utf-8"><title>CallPulse Sentinel — LIVE</title>
 <style>
   :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --dim:#8b949e;
           --rep:#1f6feb; --repglow:#79b8ff; --cust:#238636; --custglow:#56d364;
@@ -310,7 +310,7 @@ PAGE = r"""<!DOCTYPE html>
   .skip-item:hover .skip-seek { color:var(--repglow); }
 </style></head><body>
 <header>
-  <h1>&#128737; AI CALL MODERATOR &mdash; LIVE</h1>
+  <h1>&#128737; CALLPULSE SENTINEL &mdash; LIVE</h1>
   <span class="dot" id="dot"></span>
   <span id="status">connecting&hellip;</span>
   <span id="supervising" title="Supervisor has joined the call">&#128101;&#128101; SUPERVISING</span>
@@ -830,7 +830,7 @@ function render(ev) {
       const escP = p.querySelector('.esc-panel');
       escP.classList.add('open', 'escalated-open');
     }
-    document.title = '🚨 ESCALATION — AI Call Moderator';
+    document.title = '🚨 ESCALATION — CallPulse Sentinel';
     if (ev.call_id !== selectedCall) {
       const tab = document.querySelector('.tab[data-cid="' + ev.call_id + '"]');
       if (tab) tab.classList.add('alerted');
@@ -861,7 +861,7 @@ function render(ev) {
     document.getElementById('calls').innerHTML = '';
     selectedCall = null;
     cursor = 0;
-    document.title = 'AI Call Moderator — LIVE';
+    document.title = 'CallPulse Sentinel — LIVE';
     statusEl.textContent = 'dashboard cleared — waiting for new run…';
   }
 }
