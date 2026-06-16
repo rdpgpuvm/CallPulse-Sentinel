@@ -394,7 +394,7 @@ function startPolling() {
     try {
       const r = await fetch(base + 'events?since=' + cursor);
       const d = await r.json();
-      d.events.forEach(render); cursor = d.next;
+      d.events.forEach(ev => render(ev)); cursor = d.next;
     } catch (e) {}
   }, 1000);
 }
@@ -412,11 +412,11 @@ function connectWS() {
          preserving session history without duplicates on reconnect.            */
       fetch(base + 'events?since=' + cursor)
         .then(r => r.json())
-        .then(d => { d.events.forEach(render); cursor = Math.max(cursor, d.next); })
+        .then(d => { d.events.forEach(ev => render(ev)); cursor = Math.max(cursor, d.next); })
         .catch(() => {})
         .finally(() => goLive('websocket'));
     };
-    ws.onmessage = (e) => { render(JSON.parse(e.data)); cursor++; };
+    ws.onmessage = (e) => { render(JSON.parse(e.data), true); cursor++; };
     ws.onerror   = () => { if (!opened) startPolling(); };
     ws.onclose   = () => { setTimeout(connectWS, 2000); };
     /* if WS hasn't opened within 3s start polling as a fallback */
@@ -768,8 +768,36 @@ function showTranscript(callId) {
   };
   _txModal.classList.add("open");
 }
+/* escalation chime — short two-note bell via Web Audio (no asset). Plays ONCE per
+   escalation, on LIVE alerts only (never on history replay/refresh). Audio is
+   unlocked on the first user gesture, per browser autoplay policy. */
+let _audioCtx = null;
+const _chimed = new Set();
+function _ensureAudio() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_audioCtx.state === "suspended") _audioCtx.resume();
+  } catch (e) { return null; }
+  return _audioCtx;
+}
+window.addEventListener("pointerdown", _ensureAudio, { once: true });
+function playChime(callId) {
+  if (callId) { if (_chimed.has(callId)) return; _chimed.add(callId); }   // one chime per escalation
+  const ctx = _ensureAudio();
+  if (!ctx) return;
+  const now = ctx.currentTime;
+  [[880, 0.0], [1174.7, 0.16]].forEach(pair => {
+    const osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.type = "sine"; osc.frequency.value = pair[0];
+    gain.gain.setValueAtTime(0.0001, now + pair[1]);
+    gain.gain.exponentialRampToValueAtTime(0.22, now + pair[1] + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + pair[1] + 0.5);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(now + pair[1]); osc.stop(now + pair[1] + 0.55);
+  });
+}
 /* ---------- render ---------- */
-function render(ev) {
+function render(ev, live) {
   if (ev.type === 'turn') {
     const p = panel(ev.call_id);
     p.querySelectorAll('.person').forEach(el => el.classList.remove('speaking'));
@@ -816,6 +844,7 @@ function render(ev) {
       seekTo(ev.call_id, ev.audio_start_s);
 
   } else if (ev.type === 'alert') {
+    if (live) playChime(ev.call_id);          // one bell per live escalation
     const p = panel(ev.call_id);
     p.classList.add('escalated');
     const b = document.createElement('div');
@@ -861,6 +890,7 @@ function render(ev) {
     document.getElementById('calls').innerHTML = '';
     selectedCall = null;
     cursor = 0;
+    _chimed.clear();
     document.title = 'CallPulse Sentinel — LIVE';
     statusEl.textContent = 'dashboard cleared — waiting for new run…';
   }

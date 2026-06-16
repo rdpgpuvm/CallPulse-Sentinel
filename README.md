@@ -1,4 +1,4 @@
-# AI Call Moderator — Real-Time Compliance Pipeline
+# CallPulse Sentinel — Real-Time Compliance Pipeline
 
 A two-model pipeline that monitors live call center calls for policy violations.
 **Whisper** (ASR) transcribes audio; **Qwen3-4B-Instruct** (LLM judge via vLLM on AMD GPU)
