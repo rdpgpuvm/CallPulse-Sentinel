@@ -123,6 +123,8 @@ PAGE = r"""<!DOCTYPE html>
   .esc-panel.open { display:block; }
   .esc-panel-title { font-size:11px; font-weight:700; letter-spacing:.8px;
                      color:#ffa198; text-transform:uppercase; margin-bottom:8px; }
+  .esc-items { max-height:240px; overflow-y:auto; }   /* scroll all escalated segments; title stays above */
+  .esc-count { color:var(--dim); font-weight:600; }
   .esc-item { display:flex; align-items:center; gap:12px; padding:7px 10px;
               border-radius:8px; cursor:pointer; font-size:13px;
               border:1px solid transparent; }
@@ -318,7 +320,7 @@ PAGE = r"""<!DOCTYPE html>
     <input type="checkbox" id="syncCheck" style="margin-right:5px">Sync audio
   </label>
   <button class="hbtn" id="cleanToggle">Simple</button>
-  <button class="hbtn" id="soundBtn" title="Enable escalation alert sound (one click — needed once per session)">&#128276; Enable sound</button>
+  <button class="hbtn" id="soundBtn" title="Toggle escalation alert sound">&#128276; Enable Alert</button>
 </header>
 <div id="tabs"></div>
 <div id="calls"></div>
@@ -326,7 +328,7 @@ PAGE = r"""<!DOCTYPE html>
 let base = location.pathname; if (!base.endsWith('/')) base += '/';
 const statusEl = document.getElementById('status');
 const soundBtn = document.getElementById('soundBtn');
-soundBtn.onclick = () => unlockAudio(true);
+soundBtn.onclick = toggleAlert;
 
 const calls    = {};
 const callData = {};
@@ -467,6 +469,14 @@ function joinCall(callId) {
 }
 
 /* ---------- escalation list ---------- */
+function addEsc(callId, seg) {                       // append a flagged segment, deduped by turn
+  const cd = callData[callId]; if (!cd) return;
+  cd.escalations = cd.escalations || [];
+  if (cd.escalations.some(e => e.turn_number === seg.turn_number)) return;   // already listed
+  cd.escalations.push(seg);
+  cd.escalations.sort((a, b) => (a.turn_number || 0) - (b.turn_number || 0));
+  refreshEscList(callId);
+}
 function refreshEscList(callId) {
   const items = calls[callId].querySelector('.esc-items');
   items.innerHTML = '';
@@ -771,16 +781,24 @@ function showTranscript(callId) {
   };
   _txModal.classList.add("open");
 }
-/* escalation chime — Web Audio bell, independent of the <audio> player. Browser
-   policy blocks ALL sound until the page gets a user gesture, so we expose an
-   explicit "Enable sound" button (one click per session); any gesture also unlocks.
-   An escalation that fires BEFORE sound is enabled is remembered and rings the
-   instant it is unlocked, and the button flags the missed alert meanwhile. */
-let _audioCtx = null, _soundReady = false, _pendingChime = false;
+/* escalation alert chime — Web Audio bell, independent of the <audio> player.
+   "Enable Alert" is a graceful ON/OFF toggle:
+     OFF -> click enables (the click also satisfies the browser gesture needed for
+            audio) + plays a short confirmation tick; label becomes "Alert On".
+     ON  -> click disables (mutes future chimes); label becomes "Enable Alert".
+   _alertOn = user preference; _soundReady = browser audio unlock. A chime that
+   fires while ON but not-yet-unlocked is remembered and rings on the next unlock.
+   History replay/refresh stays silent (gated by `live` in render). */
+let _audioCtx = null, _soundReady = false, _pendingChime = false, _alertOn = false;
 function _setSoundBtn() {
   const b = document.getElementById("soundBtn"); if (!b) return;
-  if (_soundReady) { b.textContent = "\uD83D\uDD14 Sound on"; b.classList.add("on"); }
-  else { b.textContent = _pendingChime ? "\uD83D\uDD14 Enable sound (missed alert!)" : "\uD83D\uDD14 Enable sound"; b.classList.remove("on"); }
+  if (_alertOn) {
+    b.textContent = "\uD83D\uDD14 Alert On"; b.classList.add("on");
+    b.title = "Escalation alert sound is ON — click to disable";
+  } else {
+    b.textContent = "\uD83D\uDD14 Enable Alert"; b.classList.remove("on");
+    b.title = "Click to enable escalation alert sound";
+  }
 }
 function _chimeTones(ctx) {
   const now = ctx.currentTime;
@@ -800,24 +818,25 @@ function unlockAudio(testTick) {
   } catch (e) { return; }
   const done = () => {
     _soundReady = (_audioCtx.state === "running");
-    if (_soundReady && _pendingChime) { _pendingChime = false; _chimeTones(_audioCtx); }
+    if (_soundReady && _alertOn && _pendingChime) { _pendingChime = false; _chimeTones(_audioCtx); }
     else if (_soundReady && testTick) { _chimeTones(_audioCtx); }
-    _setSoundBtn();
   };
   if (_audioCtx.state === "suspended") _audioCtx.resume().then(done).catch(() => {});
   else done();
 }
-/* any gesture also unlocks (capture phase, repeated) — covers clicking anywhere */
+function toggleAlert() {
+  if (_alertOn) { _alertOn = false; _pendingChime = false; }   // ON -> mute
+  else { _alertOn = true; unlockAudio(true); }                 // OFF -> enable (click unlocks audio)
+  _setSoundBtn();
+}
+/* any gesture keeps the audio context unlocked (does NOT change the on/off choice) */
 ["pointerdown", "keydown", "click"].forEach(evt =>
   window.addEventListener(evt, () => unlockAudio(false), true));
-/* best-effort arm at page load: works only if the browser already permits audio
-   (site set to "always allow sound", high media-engagement, etc.); otherwise it
-   stays suspended and the first gesture above arms it. No way to force it earlier. */
-try { unlockAudio(false); } catch (e) {}
 function playChime() {
+  if (!_alertOn) return;                                    // alerts disabled by user
   if (_audioCtx && _audioCtx.state === "running") { _chimeTones(_audioCtx); return; }
-  _pendingChime = true; _setSoundBtn();   // not unlocked yet -> ring on enable
-  unlockAudio(false);                      // best-effort (works if a gesture happened recently)
+  _pendingChime = true;                                     // armed but not unlocked -> ring on unlock
+  unlockAudio(false);
 }
 /* ---------- render ---------- */
 function render(ev, live) {
@@ -861,6 +880,12 @@ function render(ev, live) {
     if (_rc) _rc.addEventListener('click', () => showReasonDialog(ev.reason, ev));
     (callData[ev.call_id].turns || (callData[ev.call_id].turns = [])).push(   // for Full transcript
       { role: ev.role, text: ev.text, turn_number: ev.turn_number });
+    if (ev.violations && ev.violations.length) {        // list EVERY flagged segment
+      const _who = ev.role === 'rep' ? 'representative' : 'customer';
+      addEsc(ev.call_id, { audio_start_s: ev.audio_start_s, turn_number: ev.turn_number,
+        rule: ev.violations.join(', ') + (ev.reason ? ' \u2014 ' + ev.reason : ''),
+        detail: _who + ': "' + ev.text + '"' });
+    }
     if (!cleanMode && nearBottom()) t.scrollIntoView({behavior:'smooth', block:'end'});
     statusEl.textContent = 'live — last turn t' + ev.turn_number + ' (' + ev.call_id + ')';
     if (audioSync && ev.call_id === selectedCall && ev.audio_start_s !== undefined)
@@ -876,8 +901,8 @@ function render(ev, live) {
                     '  (judge ' + ev.judge_ms + ' ms)';
     p.insertBefore(b, p.querySelector('.esc-panel'));
     p.querySelector('.override-btn').style.display = '';
-    callData[ev.call_id].escalations.push(ev);
-    refreshEscList(ev.call_id);
+    addEsc(ev.call_id, { audio_start_s: ev.audio_start_s, turn_number: ev.turn_number,
+      rule: ev.rule, detail: ev.detail });   // rule-3 (no codes) still lands here; deduped if already listed
     if (cleanMode) {
       const escP = p.querySelector('.esc-panel');
       escP.classList.add('open', 'escalated-open');
