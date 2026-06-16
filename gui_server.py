@@ -635,7 +635,7 @@ function panel(callId) {
       '</div>' +
       '<div class="stage">' +
         '<div class="person rep"><span class="figure">🧑‍💼</span>' +
-          '<div class="plabel">Customer Rep</div></div>' +
+          '<div class="plabel">Representative</div></div>' +
         '<div class="speech">waiting for audio&hellip;</div>' +
         '<div class="person customer"><span class="figure">🚶</span>' +
           '<div class="plabel">Customer</div></div>' +
@@ -723,7 +723,7 @@ function _txBlocks(turns) {
   });
   return blocks;
 }
-function _txWho(role) { return role === "rep" ? "Customer Rep" : (role === "customer" ? "Customer" : "Speaker"); }
+function _txWho(role) { return role === "rep" ? "Representative" : (role === "customer" ? "Customer" : "Speaker"); }
 function _txWire(panel, callId) {
   const b = panel.querySelector(".lf-tx-btn");
   if (b) b.addEventListener("click", () => showTranscript(callId));
@@ -789,7 +789,7 @@ function render(ev) {
     }
     const t = document.createElement('div');
     t.className = 'turn ' + ev.role + (ev.violations.length ? ' violation' : '');
-    const who = ev.role === 'rep' ? 'Customer Rep' : 'Customer';
+    const who = ev.role === 'rep' ? 'Representative' : 'Customer';
     let chips = '<span class="chip sent">sent ' + (ev.sentiment >= 0 ? '+' : '') + ev.sentiment + '</span>' +
                 '<span class="chip time">asr ' + ev.asr_ms + 'ms &middot; queue ' + ev.queue_ms +
                 'ms &middot; judge ' + ev.judge_ms + 'ms</span>';
